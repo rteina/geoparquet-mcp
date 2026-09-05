@@ -33,6 +33,9 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          # One cache per matrix leg. Sharing a key makes the two jobs race to
+          # save it, and the loser prints a warning on every run.
+          cache-suffix: py${{ matrix.python-version }}
 
       # --frozen, not --locked: a fresh clone must resolve to exactly what
       # uv.lock records, or CI is testing a dependency set nobody else has.
