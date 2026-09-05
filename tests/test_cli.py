@@ -18,18 +18,32 @@ So the invariants are stated here rather than trusted:
 All three are hermetic: they read the CLI's syntax tree and never call it. The
 end-to-end run is marked `network`, because the demo's fifth section measures
 bytes over HTTP and there is nothing local to measure.
+
+`serve` is checked differently, at the bottom of this file, because a syntax
+tree cannot see what it got wrong. The command shipped calling `build_server()`
+without installing a perimeter first: it started, announced its eight tools,
+and failed every call that followed. Nothing it names is missing and nothing it
+imports is forbidden, so every test above passes on it. Only running the
+command and asking it a question finds that.
 """
 
 from __future__ import annotations
 
 import ast
 import importlib
+import json
+import os
+import select
+import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
 from geoparquet_mcp import cli
+from geoparquet_mcp.engine import sources
 
 CLI_PATH = Path(cli.__file__)
 CLI_TREE = ast.parse(CLI_PATH.read_text(encoding="utf-8"), filename=str(CLI_PATH))
@@ -152,3 +166,102 @@ def test_the_demo_still_reports_the_number_the_readme_quotes() -> None:
 def test_the_demo_runs_end_to_end() -> None:
     """The whole command, against the remote dataset. What `./scripts/demo.sh` does."""
     assert cli.run_demo(as_json=True) == 0
+
+
+# The two ways to reach the same stdio server: the console script Claude Desktop
+# is configured with, and the CLI subcommand the project's own docs use. Both
+# have to install the perimeter before serving, and only one of them used to.
+STDIO_ENTRY_POINTS = {
+    "geoparquet-mcp-server": ["-m", "geoparquet_mcp.server", "--transport", "stdio"],
+    "geoparquet-mcp serve": ["-m", "geoparquet_mcp.cli", "serve", "--transport", "stdio"],
+}
+
+PROTOCOL_VERSION = "2025-06-18"
+
+
+def _readline(stream: Any, timeout: float) -> str:
+    """One line, or an assertion — never a test that hangs until CI gives up."""
+    ready, _, _ = select.select([stream], [], [], timeout)
+    assert ready, f"the server sent nothing within {timeout:.0f}s"
+    return stream.readline()
+
+
+def _ask_the_catalogue(command: list[str], timeout: float = 30.0) -> dict[str, Any]:
+    """Start a stdio server, read `geoparquet://sources`, and return the reply.
+
+    The catalogue is the cheapest question that still needs an installed
+    perimeter: `catalog_document()` asks `dependencies.current()` for the scope
+    and raises when nobody installed one. It touches no network, so this test
+    is hermetic despite spawning a real server and speaking the real protocol.
+    """
+    process = subprocess.Popen(
+        [sys.executable, *command],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        # Pinned so startup resolves the release from the environment instead
+        # of listing the bucket, which would make this test a network test.
+        env={**os.environ, "GEOPARQUET_RELEASE": sources.OVERTURE_PINNED_RELEASE},
+    )
+    try:
+        assert process.stdin is not None and process.stdout is not None
+
+        def send(message: dict[str, Any]) -> None:
+            process.stdin.write(json.dumps(message) + "\n")
+            process.stdin.flush()
+
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "test_cli", "version": "0"},
+                },
+            }
+        )
+        _readline(process.stdout, timeout)
+        send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "resources/read",
+                "params": {"uri": "geoparquet://sources"},
+            }
+        )
+        return json.loads(_readline(process.stdout, timeout))
+    finally:
+        # Closing stdin is how a stdio server is asked to stop; kill is the
+        # fallback so a wedged server never outlives its test.
+        process.stdin.close() if process.stdin else None
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover - a server that will not exit
+            process.kill()
+
+
+@pytest.mark.parametrize("entry_point", sorted(STDIO_ENTRY_POINTS))
+def test_a_stdio_server_answers_once_it_is_launched(entry_point: str) -> None:
+    """Launch it the way a client does, and ask it something.
+
+    This is the test that was missing. `geoparquet-mcp serve` built the server
+    and ran it without `dependencies.install(...)`, so every handler raised
+    `DependenciesNotInstalledError` — a failure invisible to an AST walk,
+    because the bug is a line that is not there.
+    """
+    reply = _ask_the_catalogue(STDIO_ENTRY_POINTS[entry_point])
+
+    assert "error" not in reply, (
+        f"`{entry_point}` served a catalogue it could not read: "
+        f"{reply.get('error', {}).get('message')}. The entry point has to resolve the "
+        "perimeter and install it before serving — see `server.main`."
+    )
+    document = json.loads(reply["result"]["contents"][0]["text"])
+    assert document["release"] == sources.OVERTURE_PINNED_RELEASE
+    assert set(document["sources"] and [entry["name"] for entry in document["sources"]]) == set(
+        sources.SOURCES
+    )
