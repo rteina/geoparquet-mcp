@@ -4,11 +4,8 @@ An MCP server that runs spatial analysis directly on remote GeoParquet files —
 over HTTP range requests, so nothing is downloaded or imported first.
 
 ```sh
-uv run geoparquet-mcp demo
+./scripts/demo.sh
 ```
 
-Without [uv](https://docs.astral.sh/uv/), on Python 3.12+:
-
-```sh
-pip install -e . && geoparquet-mcp demo
-```
+The script prepares its own environment: [uv](https://docs.astral.sh/uv/) when it is on PATH,
+otherwise `python3 -m venv` plus pip on Python 3.12+. Run `./scripts/demo.sh --help` for options.
