@@ -123,10 +123,21 @@ ensure_env() {
     touch "$VENV_DIR/.deps_installed"
 }
 
-# Run the project CLI in the prepared environment, replacing this shell so that
-# Ctrl+C reaches the query and the exit status is the CLI's own.
-run_cli() {
+# Run one of the project's console scripts in the prepared environment,
+# replacing this shell so that Ctrl+C reaches the process itself and the exit
+# status is its own. `exec` also matters for the stdio server: a wrapper shell
+# between a desktop client and the protocol is one more thing that can hold a
+# pipe open after the server is gone.
+run_bin() {
+    local bin="$1"
+    shift
     ensure_env
     cd "$PROJECT_DIR"
-    exec "$CLI_BIN" "$@"
+    [ -x "$VENV_DIR/bin/$bin" ] || fail "$bin is missing from $VENV_DIR. Try: rm -rf '$VENV_DIR' && $0"
+    exec "$VENV_DIR/bin/$bin" "$@"
+}
+
+# Run the project CLI. The common case of run_bin.
+run_cli() {
+    run_bin "$(basename "$CLI_BIN")" "$@"
 }
