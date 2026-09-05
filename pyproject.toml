@@ -39,6 +39,7 @@ Issues = "https://github.com/rteina/geoparquet-mcp/issues"
 [project.scripts]
 geoparquet-mcp = "geoparquet_mcp.cli:main"
 geoparquet-mcp-server = "geoparquet_mcp.server:main"
+geoparquet-mcp-http = "geoparquet_mcp.app:main"
 
 [build-system]
 requires = ["hatchling"]

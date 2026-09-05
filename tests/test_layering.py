@@ -135,3 +135,99 @@ def test_the_engine_surface_is_importable_on_its_own() -> None:
     module = importlib.import_module("geoparquet_mcp.engine")
     for name in ("bbox_query", "h3_aggregate", "point_in_polygon", "DatasetScope"):
         assert hasattr(module, name), f"{name} missing from the engine's public surface"
+
+
+def _registered_handlers() -> dict[str, ast.FunctionDef]:
+    """Every function registered as an MCP tool, by its registered name."""
+    handlers: dict[str, ast.FunctionDef] = {}
+    for path in sorted((PACKAGE_ROOT / "tools").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Call)
+                and isinstance(node.func.func, ast.Attribute)
+                and node.func.func.attr == "tool"
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+            ):
+                registered = next(
+                    (k.value.value for k in node.func.keywords if k.arg == "name"), None
+                )
+                if registered:
+                    names[node.args[0].id] = registered
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name in names:
+                handlers[names[node.name]] = node
+    return handlers
+
+
+def test_every_tool_handler_stays_a_handler() -> None:
+    """Twenty lines, docstring included.
+
+    Not a style rule. A tool handler validates nothing, computes nothing and
+    formats nothing: it names an engine operation and passes arguments to it.
+    That fits in twenty lines, and the day one does not, the reason is always
+    that logic has drifted out of the engine and into the protocol layer,
+    where it cannot be used or tested without MCP.
+    """
+    too_long = {
+        name: node.end_lineno - node.lineno + 1
+        for name, node in _registered_handlers().items()
+        if (node.end_lineno - node.lineno + 1) > 20
+    }
+    assert not too_long, (
+        "these tool handlers have grown past twenty lines, which means they are "
+        f"doing something: {too_long}. Move it into geoparquet_mcp.engine."
+    )
+
+
+def test_every_tool_handler_takes_its_perimeter_from_the_adapter() -> None:
+    """No handler may resolve its own scope.
+
+    A handler that built a `DatasetScope` — or simply omitted one and let the
+    engine fall back to its default — would read whatever the process has
+    registered rather than what the deployment allowed. The perimeter is
+    resolved once by the application and injected; every handler must say so
+    by calling the adapter.
+    """
+    missing = [
+        name
+        for name, node in _registered_handlers().items()
+        if "engine_kwargs" not in ast.dump(node)
+    ]
+    assert not missing, (
+        f"these handlers never ask the adapter for a perimeter: {missing}. "
+        "Without it the engine falls back to the default scope and the "
+        "deployment's restriction is silently ignored."
+    )
+
+
+def test_the_tool_layer_never_builds_a_scope_of_its_own() -> None:
+    for path in sorted((PACKAGE_ROOT / "tools").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for forbidden in ("DatasetScope", "default_scope", "restricted_to"):
+            assert forbidden not in text, (
+                f"{path.name} builds its own perimeter ({forbidden}); it must take "
+                f"the injected one from geoparquet_mcp.dependencies"
+            )
+
+
+def test_the_documented_grep_for_sql_in_the_tool_layer_returns_nothing() -> None:
+    """The literal shell check from the project's own architecture notes.
+
+    `grep -rc "duckdb\\|SELECT" src/geoparquet_mcp/tools/` must be 0 on every
+    file. Prose counts: a tool description that teaches SQL belongs beside the
+    dialect it describes, in the engine, not in the handler that names it.
+    """
+    project_root = PACKAGE_ROOT.parent.parent
+    found = subprocess.run(
+        ["grep", "-rc", "duckdb\\|SELECT", "src/geoparquet_mcp/tools/"],
+        capture_output=True,
+        text=True,
+        cwd=project_root,
+        check=False,
+    ).stdout.splitlines()
+    offenders = [line for line in found if not line.endswith(":0")]
+    assert not offenders, "\n".join(offenders)
