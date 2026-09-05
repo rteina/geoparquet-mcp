@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
@@ -53,6 +53,9 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 # `parquet_metadata()` renders a nested column's path with ", " between the
 # levels, so the bbox members are addressed as 'bbox, xmin' and not 'bbox.xmin'.
+# The four rectangle fields, in the order the public operations take them.
+_BBOX_FIELDS = ("min_lon", "min_lat", "max_lon", "max_lat")
+
 _BBOX_STAT_PATHS = {
     "xmin": "{column}, xmin",
     "ymin": "{column}, ymin",
@@ -194,6 +197,73 @@ class PointInPolygonRequest(BaseModel):
     limit: int = Field(default=50, ge=1)
 
 
+class SpatialFilterRequest(_Filters):
+    """Inputs to `spatial_filter`, the general form behind `bbox_query`."""
+
+    source: str
+    bbox: BoundingBox | None = None
+    wkt: str | None = Field(
+        default=None,
+        description="A WKT geometry in WGS 84 degrees, as an alternative to a rectangle",
+    )
+    columns: list[str] | None = None
+    include_geometry: bool = True
+    limit: int = Field(default=50, ge=1)
+
+    @field_validator("columns")
+    @classmethod
+    def _columns_are_identifiers(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else [_safe_column(column) for column in value]
+
+    @model_validator(mode="after")
+    def _exactly_one_shape(self) -> SpatialFilterRequest:
+        if (self.bbox is None) == (self.wkt is None):
+            raise ValueError(
+                "give exactly one of a bounding box (min_lon/min_lat/max_lon/max_lat) "
+                "or a `wkt` geometry"
+            )
+        return self
+
+
+class PreviewRequest(BaseModel):
+    """Inputs to `preview_rows`."""
+
+    source: str
+    columns: list[str] | None = None
+    limit: int = Field(default=10, ge=1, le=100)
+
+    @field_validator("columns")
+    @classmethod
+    def _columns_are_identifiers(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else [_safe_column(column) for column in value]
+
+
+class AttributeAggregateRequest(BaseModel):
+    """Inputs to `attribute_aggregate`."""
+
+    source: str
+    group_by: str = Field(description="Column whose distinct values become the groups")
+    aggregate: Literal["count", "sum", "avg", "min", "max"] = "count"
+    measure: str | None = Field(
+        default=None, description="Column to aggregate; required for all but `count`"
+    )
+    bbox: BoundingBox | None = None
+    limit: int = Field(default=50, ge=1)
+
+    @field_validator("group_by", "measure")
+    @classmethod
+    def _columns_are_identifiers(cls, value: str | None) -> str | None:
+        return None if value is None else _safe_column(value)
+
+    @model_validator(mode="after")
+    def _measure_matches_aggregate(self) -> AttributeAggregateRequest:
+        if self.aggregate == "count" and self.measure is not None:
+            raise ValueError("`count` counts rows and takes no `measure` column")
+        if self.aggregate != "count" and self.measure is None:
+            raise ValueError(f"`{self.aggregate}` needs a `measure` column to aggregate")
+        return self
+
+
 def _validated(model: type[BaseModel], **kwargs: Any) -> Any:
     """Build a request model, reporting failures as `InvalidRequestError`.
 
@@ -243,6 +313,24 @@ def _bbox_around(lon: float, lat: float, radius_km: float) -> BoundingBox:
         max_lon=min(180.0, lon + lon_delta),
         max_lat=min(90.0, lat + lat_delta),
     )
+
+
+def _optional_box(
+    min_lon: float | None,
+    min_lat: float | None,
+    max_lon: float | None,
+    max_lat: float | None,
+) -> dict[str, float] | None:
+    """A rectangle from four optional corners: all four, or none at all."""
+    corners = (min_lon, min_lat, max_lon, max_lat)
+    if all(value is None for value in corners):
+        return None
+    if any(value is None for value in corners):
+        raise InvalidRequestError(
+            "a bounding box needs all four of min_lon, min_lat, max_lon and max_lat; "
+            "omit all four to cover the whole dataset"
+        )
+    return dict(zip(_BBOX_FIELDS, corners, strict=True))
 
 
 def _projection(definition: Source, columns: list[str] | None) -> str:
@@ -415,9 +503,15 @@ def dataset_schema(
 ) -> dict[str, Any]:
     """Return one dataset's columns and types, and say which one is the geometry.
 
-    Contract: reads Parquet footer metadata only, so this describes a
-    multi-gigabyte dataset for kilobytes. The exact row count, part count and
-    remote size come from the same footers and are included.
+    Contract: reads Parquet footer metadata only — never a data page — so the
+    cost is proportional to the number of row groups rather than to the number
+    of rows. The exact row count, part count, remote size, coordinate
+    reference system and geographic extent all come from those same footers.
+
+    That is not free on a wide dataset: Overture places carries 4096 row
+    groups across 16 parts, and reading their footers cold costs about 26 MB
+    against a 10.5 GB file. The session caches footers, so the second call
+    against a dataset costs nothing.
     """
     scope = _scope_of(scope)
     definition = scope.get(source)
@@ -435,6 +529,12 @@ def dataset_schema(
             FROM parquet_file_metadata('{target}')
             """
         )
+        geo = _geoparquet_metadata(measurement, target)
+        bounds = _extent_from_statistics(measurement, target, definition.bbox_column)
+
+    extent = (
+        {key: bounds[key] for key in _BBOX_FIELDS} if bounds["min_lon"] is not None else None
+    )
 
     return {
         **_result_envelope(definition, scope),
@@ -455,6 +555,8 @@ def dataset_schema(
         "name_column": definition.name_column,
         "category_column": definition.category_column,
         "default_columns": list(definition.default_columns),
+        **geo,
+        "extent": extent,
         **footprint,
         "notes": definition.notes,
         "scan": measurement.report.as_dict(),
@@ -476,6 +578,79 @@ def _column_role(definition: Source, name: str) -> str | None:
 # ---------------------------------------------------------------------------
 # 3. Extent
 # ---------------------------------------------------------------------------
+
+
+def _extent_from_statistics(
+    measurement: Measurement, target: str, column: str
+) -> dict[str, Any]:
+    """A dataset's bounding box, from the row-group statistics in its footers.
+
+    Returns `min_lon` as None when the file carries no statistics on its bbox
+    struct, which is the signal that the extent cannot be had cheaply.
+    """
+    paths = {key: pattern.format(column=column) for key, pattern in _BBOX_STAT_PATHS.items()}
+    return measurement.one(
+        f"""
+        SELECT
+            min(TRY_CAST(stats_min AS DOUBLE))
+                FILTER (WHERE path_in_schema = '{paths["xmin"]}') AS min_lon,
+            min(TRY_CAST(stats_min AS DOUBLE))
+                FILTER (WHERE path_in_schema = '{paths["ymin"]}') AS min_lat,
+            max(TRY_CAST(stats_max AS DOUBLE))
+                FILTER (WHERE path_in_schema = '{paths["xmax"]}') AS max_lon,
+            max(TRY_CAST(stats_max AS DOUBLE))
+                FILTER (WHERE path_in_schema = '{paths["ymax"]}') AS max_lat,
+            count(*) FILTER (WHERE path_in_schema = '{paths["xmin"]}') AS row_groups
+        FROM parquet_metadata('{target}')
+        """
+    )
+
+
+def _geoparquet_metadata(measurement: Measurement, target: str) -> dict[str, Any]:
+    """The GeoParquet `geo` key from the file's key/value metadata.
+
+    GeoParquet records the CRS, the encoding and the geometry types in a JSON
+    document stored under the `geo` key in the Parquet footer, not in the
+    Arrow schema. It is the authoritative answer to "what CRS is this?", and
+    reading it costs nothing beyond the footer already being fetched.
+
+    Per the specification a null `crs` means OGC:CRS84 — longitude/latitude in
+    WGS 84 degrees — which is what every operation here assumes.
+    """
+    rows = measurement.records(
+        f"""
+        SELECT decode(value) AS document
+        FROM parquet_kv_metadata('{target}')
+        WHERE decode(key) = 'geo'
+        LIMIT 1
+        """
+    )
+    if not rows:
+        return {"crs": None, "encoding": None, "geometry_types": [], "geoparquet_version": None}
+    document = json.loads(rows[0]["document"])
+    primary = document.get("primary_column")
+    column = (document.get("columns") or {}).get(primary) or {}
+    crs = column.get("crs")
+    return {
+        "crs": _crs_identifier(crs),
+        "crs_is_default": crs is None,
+        "encoding": column.get("encoding"),
+        "geometry_types": column.get("geometry_types") or [],
+        "geoparquet_version": document.get("version"),
+    }
+
+
+def _crs_identifier(crs: Any) -> str:
+    """A readable CRS name from GeoParquet's PROJJSON, or the spec's default."""
+    if crs is None:
+        return "OGC:CRS84"
+    if isinstance(crs, str):
+        return crs
+    identifier = crs.get("id") or {}
+    authority, code = identifier.get("authority"), identifier.get("code")
+    if authority and code is not None:
+        return f"{authority}:{code}"
+    return crs.get("name") or "unknown"
 
 
 def dataset_extent(
@@ -502,24 +677,9 @@ def dataset_extent(
     definition = scope.get(source)
     target = scope.target(source)
     column = definition.bbox_column
-    paths = {key: pattern.format(column=column) for key, pattern in _BBOX_STAT_PATHS.items()}
 
     with _session_of(session).measure() as measurement:
-        stats = measurement.one(
-            f"""
-            SELECT
-                min(TRY_CAST(stats_min AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{paths["xmin"]}') AS min_lon,
-                min(TRY_CAST(stats_min AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{paths["ymin"]}') AS min_lat,
-                max(TRY_CAST(stats_max AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{paths["xmax"]}') AS max_lon,
-                max(TRY_CAST(stats_max AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{paths["ymax"]}') AS max_lat,
-                count(*) FILTER (WHERE path_in_schema = '{paths["xmin"]}') AS row_groups
-            FROM parquet_metadata('{target}')
-            """
-        )
+        stats = _extent_from_statistics(measurement, target, column)
         from_statistics = stats["min_lon"] is not None
 
         if not from_statistics:
@@ -559,6 +719,134 @@ def dataset_extent(
 # ---------------------------------------------------------------------------
 
 
+def _wkt_envelope(measurement: Measurement, wkt: str) -> BoundingBox:
+    """The bounding rectangle of a WKT geometry, computed locally.
+
+    A WKT polygon is not something Parquet statistics can prune on, but its
+    envelope is. This resolves the envelope with a constant-folded query that
+    touches no remote file, so the pruning rectangle costs zero bytes.
+    """
+    try:
+        corners = measurement.one(
+            "SELECT ST_XMin(g) AS min_lon, ST_YMin(g) AS min_lat, "
+            "ST_XMax(g) AS max_lon, ST_YMax(g) AS max_lat "
+            "FROM (SELECT ST_GeomFromText(?) AS g)",
+            [wkt],
+        )
+    except RemoteReadError as exc:
+        raise InvalidRequestError(
+            f"could not parse `wkt` as a WKT geometry: {exc}. Expected something like "
+            f"'POLYGON ((2.33 48.85, 2.36 48.85, 2.36 48.87, 2.33 48.87, 2.33 48.85))'."
+        ) from exc
+    if corners["min_lon"] is None:
+        raise InvalidRequestError("`wkt` parsed to an empty geometry, which selects nothing")
+    return _validated(BoundingBox, **corners)
+
+
+def spatial_filter(
+    source: str = sources.DEFAULT_SOURCE,
+    min_lon: float | None = None,
+    min_lat: float | None = None,
+    max_lon: float | None = None,
+    max_lat: float | None = None,
+    wkt: str | None = None,
+    category: str | None = None,
+    name_contains: str | None = None,
+    min_confidence: float | None = None,
+    columns: list[str] | None = None,
+    include_geometry: bool = True,
+    limit: int = 50,
+    scope: DatasetScope | None = None,
+    session: Session | None = None,
+) -> dict[str, Any]:
+    """Return features intersecting a rectangle or a WKT geometry, as GeoJSON.
+
+    Contract: whichever shape is given, a rectangle is what reaches the
+    Parquet reader. A bounding box is pushed down directly; a WKT geometry is
+    reduced to its envelope for pruning and then re-tested exactly with
+    `ST_Intersects` over the surviving rows, so the answer is exact but the
+    read is still proportional to the envelope.
+
+    Only the byte ranges that can contain a match are fetched, and the `scan`
+    block reports how many bytes that was. The result is a GeoJSON
+    FeatureCollection whose `properties` carry the selected columns.
+
+    `include_geometry=False` skips reading the geometry column and synthesises
+    a Point from the feature's stored bounding-box corner instead. That is
+    exact for point datasets and an approximation for polygonal ones, but it
+    avoids fetching the single widest column in the file. It has no effect on
+    the read when `wkt` is used, because the exact test needs the geometry.
+    """
+    if wkt is None and any(value is None for value in (min_lon, min_lat, max_lon, max_lat)):
+        raise InvalidRequestError(
+            "a rectangle needs all four of min_lon, min_lat, max_lon and max_lat; "
+            "pass `wkt` instead to filter on an arbitrary geometry"
+        )
+    box = _optional_box(min_lon, min_lat, max_lon, max_lat)
+
+    request: SpatialFilterRequest = _validated(
+        SpatialFilterRequest,
+        source=source,
+        bbox=box,
+        wkt=wkt,
+        category=category,
+        name_contains=name_contains,
+        min_confidence=min_confidence,
+        columns=columns,
+        include_geometry=include_geometry,
+        limit=limit,
+    )
+    scope = _scope_of(scope)
+    definition = scope.get(request.source)
+    target = scope.target(request.source)
+    row_limit = clamp_limit(request.limit)
+
+    with _session_of(session).measure() as measurement:
+        pruning_box = request.bbox or _wkt_envelope(measurement, request.wkt or "")
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        if request.wkt is not None:
+            # Exactness, applied only to the rows the envelope let through.
+            clauses.append(f"ST_Intersects({definition.geometry_column}, ST_GeomFromText(?))")
+            params.append(request.wkt)
+        attribute_clauses, attribute_params = _attribute_filters(definition, request)
+        clauses.extend(attribute_clauses)
+        params.extend(attribute_params)
+        where = " AND ".join([pruning_box.predicate(definition.bbox_column), *clauses])
+
+        if request.include_geometry or request.wkt is not None:
+            geometry_sql = f"ST_AsGeoJSON({definition.geometry_column})"
+        else:
+            # The bbox corner, which for a point dataset *is* the point.
+            geometry_sql = (
+                f"json_object('type', 'Point', 'coordinates', "
+                f"json_array({definition.bbox_column}.xmin, {definition.bbox_column}.ymin))"
+            )
+
+        sql = (
+            f"SELECT {_projection(definition, request.columns)}, "
+            f"{geometry_sql} AS __geometry "
+            f"FROM read_parquet('{target}') "
+            f"WHERE {where} "
+            f"LIMIT {row_limit}"
+        )
+        rows = measurement.records(sql, params)
+
+    return {
+        **_result_envelope(definition, scope),
+        "bbox": pruning_box.as_dict(),
+        "wkt": request.wkt,
+        "geojson": _feature_collection(rows, definition),
+        "feature_count": len(rows),
+        "limit": row_limit,
+        "truncated": len(rows) == row_limit,
+        "geometry_is_exact": request.include_geometry or request.wkt is not None,
+        "sql": sql,
+        "scan": measurement.report.as_dict(),
+    }
+
+
 def bbox_query(
     min_lon: float,
     min_lat: float,
@@ -576,66 +864,24 @@ def bbox_query(
 ) -> dict[str, Any]:
     """Return features intersecting a lon/lat rectangle, as GeoJSON.
 
-    Contract: the rectangle is pushed into the remote Parquet file as
-    row-group pruning, so only the byte ranges that can contain a match are
-    fetched; the `scan` block reports how many bytes that was. The result is a
-    GeoJSON FeatureCollection whose `properties` carry the selected columns.
-
-    `include_geometry=False` skips reading the geometry column and synthesises
-    a Point from the feature's stored bounding-box corner instead. That is
-    exact for point datasets and an approximation for polygonal ones, but it
-    avoids fetching the single widest column in the file.
+    The rectangle-only form of `spatial_filter`, kept because a rectangle is
+    the case that prunes best and the one most callers want.
     """
-    request: BboxQueryRequest = _validated(
-        BboxQueryRequest,
+    return spatial_filter(
         source=source,
-        bbox={"min_lon": min_lon, "min_lat": min_lat, "max_lon": max_lon, "max_lat": max_lat},
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
         category=category,
         name_contains=name_contains,
         min_confidence=min_confidence,
         columns=columns,
         include_geometry=include_geometry,
         limit=limit,
+        scope=scope,
+        session=session,
     )
-    scope = _scope_of(scope)
-    definition = scope.get(request.source)
-    target = scope.target(request.source)
-    row_limit = clamp_limit(request.limit)
-
-    clauses, params = _attribute_filters(definition, request)
-    where = " AND ".join([request.bbox.predicate(definition.bbox_column), *clauses])
-
-    if request.include_geometry:
-        geometry_sql = f"ST_AsGeoJSON({definition.geometry_column})"
-    else:
-        # The bbox corner, which for a point dataset *is* the point.
-        geometry_sql = (
-            f"json_object('type', 'Point', 'coordinates', "
-            f"json_array({definition.bbox_column}.xmin, {definition.bbox_column}.ymin))"
-        )
-
-    sql = (
-        f"SELECT {_projection(definition, request.columns)}, "
-        f"{geometry_sql} AS __geometry "
-        f"FROM read_parquet('{target}') "
-        f"WHERE {where} "
-        f"LIMIT {row_limit}"
-    )
-
-    with _session_of(session).measure() as measurement:
-        rows = measurement.records(sql, params)
-
-    return {
-        **_result_envelope(definition, scope),
-        "bbox": request.bbox.as_dict(),
-        "geojson": _feature_collection(rows, definition),
-        "feature_count": len(rows),
-        "limit": row_limit,
-        "truncated": len(rows) == row_limit,
-        "geometry_is_exact": request.include_geometry,
-        "sql": sql,
-        "scan": measurement.report.as_dict(),
-    }
 
 
 def _feature_collection(rows: list[dict[str, Any]], definition: Source) -> dict[str, Any]:
@@ -1077,6 +1323,146 @@ def point_in_polygon(
         "polygon_subtype": request.polygon_subtype,
         "polygon_count": len(rows),
         "polygons": rows,
+        "sql": sql,
+        "scan": measurement.report.as_dict(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 9. Preview
+# ---------------------------------------------------------------------------
+
+
+def preview_rows(
+    source: str = sources.DEFAULT_SOURCE,
+    columns: list[str] | None = None,
+    limit: int = 10,
+    scope: DatasetScope | None = None,
+    session: Session | None = None,
+) -> dict[str, Any]:
+    """Return the first few rows of a dataset, to see what the values look like.
+
+    Contract: a bare `LIMIT` with no filter, which DuckDB satisfies from the
+    first row group of the first part file and then stops. The cost is one
+    row group's worth of the projected columns, not one row group per part.
+
+    This is a shape-of-the-data question, not a spatial one: the rows are
+    whatever the file happens to store first, in no meaningful geographic
+    order. Use it to learn how a column is actually populated — what a
+    category string looks like, whether a field is mostly null — before
+    writing a filter against it. Use a spatial operation to ask where things
+    are.
+    """
+    request: PreviewRequest = _validated(
+        PreviewRequest, source=source, columns=columns, limit=limit
+    )
+    scope = _scope_of(scope)
+    definition = scope.get(request.source)
+    target = scope.target(request.source)
+
+    sql = (
+        f"SELECT {_projection(definition, request.columns)} "
+        f"FROM read_parquet('{target}') "
+        f"LIMIT {request.limit}"
+    )
+
+    with _session_of(session).measure() as measurement:
+        rows = measurement.records(sql)
+
+    return {
+        **_result_envelope(definition, scope),
+        "row_count": len(rows),
+        "rows": rows,
+        "columns_returned": list(rows[0]) if rows else [],
+        "ordering": "file order — not geographic, not ranked",
+        "sql": sql,
+        "scan": measurement.report.as_dict(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 10. Attribute aggregation
+# ---------------------------------------------------------------------------
+
+
+def attribute_aggregate(
+    group_by: str,
+    source: str = sources.DEFAULT_SOURCE,
+    aggregate: str = "count",
+    measure: str | None = None,
+    min_lon: float | None = None,
+    min_lat: float | None = None,
+    max_lon: float | None = None,
+    max_lat: float | None = None,
+    limit: int = 50,
+    scope: DatasetScope | None = None,
+    session: Session | None = None,
+) -> dict[str, Any]:
+    """Group rows by one column and aggregate another: GROUP BY over remote Parquet.
+
+    Contract: the grouping and the aggregate both run inside the remote file.
+    Only the group rows cross the network, so "how many places of each
+    category are in this district" costs kilobytes whatever the district
+    holds.
+
+    Supplying a bounding box restricts the aggregate to that rectangle and
+    makes the read cheap by pruning row groups; omitting it aggregates the
+    whole dataset, which reads the grouped and measured columns in full and is
+    slow by construction on a multi-gigabyte source.
+
+    `sum`, `avg`, `min` and `max` need a `measure` column and reject a
+    non-numeric one before any byte is fetched; `count` counts rows and takes
+    no measure.
+    """
+    box = _optional_box(min_lon, min_lat, max_lon, max_lat)
+    request: AttributeAggregateRequest = _validated(
+        AttributeAggregateRequest,
+        source=source,
+        group_by=group_by,
+        aggregate=aggregate,
+        measure=measure,
+        bbox=box,
+        limit=limit,
+    )
+    scope = _scope_of(scope)
+    definition = scope.get(request.source)
+    target = scope.target(request.source)
+    row_limit = clamp_limit(request.limit)
+    where = f"WHERE {request.bbox.predicate(definition.bbox_column)}" if request.bbox else ""
+
+    with _session_of(session).measure() as measurement:
+        _column_type(measurement, target, request.group_by)
+        if request.measure is not None:
+            measure_type = _column_type(measurement, target, request.measure)
+            if not _is_numeric(measure_type):
+                raise InvalidRequestError(
+                    f"`{request.aggregate}` needs a numeric measure, but "
+                    f"{request.measure!r} is {measure_type}. Use aggregate='count' to "
+                    f"count rows per group instead."
+                )
+        expression = (
+            "count(*)" if request.measure is None
+            else f"{request.aggregate}({request.measure})"
+        )
+        sql = (
+            f"SELECT {request.group_by} AS group_value, "
+            f"{expression} AS value, count(*) AS row_count "
+            f"FROM read_parquet('{target}') {where} "
+            f"GROUP BY 1 ORDER BY value DESC NULLS LAST, group_value "
+            f"LIMIT {row_limit}"
+        )
+        groups = measurement.records(sql)
+
+    return {
+        **_result_envelope(definition, scope),
+        "group_by": request.group_by,
+        "aggregate": request.aggregate,
+        "measure": request.measure,
+        "bbox": request.bbox.as_dict() if request.bbox else None,
+        "group_count": len(groups),
+        "rows_aggregated": sum(row["row_count"] for row in groups),
+        "truncated": len(groups) == row_limit,
+        "groups": groups,
         "sql": sql,
         "scan": measurement.report.as_dict(),
     }

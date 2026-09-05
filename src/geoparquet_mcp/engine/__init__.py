@@ -28,6 +28,7 @@ from geoparquet_mcp.engine.errors import (
 )
 from geoparquet_mcp.engine.operations import (
     BoundingBox,
+    attribute_aggregate,
     bbox_query,
     column_statistics,
     dataset_extent,
@@ -36,7 +37,10 @@ from geoparquet_mcp.engine.operations import (
     list_datasets,
     nearest,
     point_in_polygon,
+    preview_rows,
+    spatial_filter,
 )
+from geoparquet_mcp.engine.query import DEFAULT_MAX_BYTES, run_sql, view_names
 from geoparquet_mcp.engine.session import (
     MAX_ROW_LIMIT,
     Measurement,
@@ -59,11 +63,17 @@ __all__ = [
     "list_datasets",
     "dataset_schema",
     "dataset_extent",
+    "preview_rows",
+    "spatial_filter",
     "bbox_query",
     "nearest",
+    "attribute_aggregate",
     "column_statistics",
     "h3_aggregate",
     "point_in_polygon",
+    "run_sql",
+    "view_names",
+    "DEFAULT_MAX_BYTES",
     # Inputs.
     "BoundingBox",
     # Perimeter.
