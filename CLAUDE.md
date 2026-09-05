@@ -18,12 +18,13 @@ uv run ruff format --check .            # format check (CI fails on this too)
 uv run geoparquet-mcp demo              # the end-to-end demo the README quotes
 uv run geoparquet-mcp benchmark --only pushdown     # the 18.8× pushdown A/B
 uv run geoparquet-mcp benchmark --only operations   # per-operation bytes/ms table
-uv run geoparquet-mcp serve --transport stdio       # MCP server
+uv run geoparquet-mcp serve --transport stdio       # MCP server (delegates to server.main)
 ./scripts/make_fixtures.py --describe   # write the test corpus somewhere inspectable
 ```
 
-`./scripts/demo.sh` is the zero-install path (bootstraps `.venv/` with uv or `python3 -m venv`); prefer
-`uv run` when the environment already exists. Both the demo and the `network` tests move real traffic
+`./scripts/demo.sh` and `./scripts/serve.sh` (`stdio` | `http` | `config`) are the zero-install paths
+(both bootstrap `.venv/` with uv or `python3 -m venv` through `scripts/_common.sh`); prefer `uv run`
+when the environment already exists. Both the demo and the `network` tests move real traffic
 against `us-west-2` — don't run them in a loop.
 
 Entry points: `geoparquet-mcp` (CLI), `geoparquet-mcp-server` (stdio MCP), `geoparquet-mcp-http` (FastAPI + mounted MCP).
@@ -71,7 +72,9 @@ Changes that violate these fail the suite; treat them as design constraints, not
 - **`tests/snapshots/mcp_surface.json`** pins every tool description and input schema. Any change to
   what a model sees must be an intentional snapshot rewrite.
 - **`tests/test_cli.py`** walks `cli.py`'s AST: it may only name things the engine actually exports,
-  may not reach through the tool layer, and the demo must pass an explicit scope to every call.
+  may not reach through the tool layer, and the demo must pass an explicit scope to every call. It
+  also launches both stdio entry points as subprocesses and reads a resource through each, because
+  the perimeter-installing line an AST walk cannot see is the one that went missing once.
 - **`tests/test_scope_isolation.py`** — 18 attempts to escape the perimeter (sibling datasets, parent
   escapes, prefix collisions, symlinks planted inside). `scope.assert_within()` is the one path that
   handles a path rather than a name.

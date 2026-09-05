@@ -25,6 +25,10 @@ Find the path:
 echo "$PWD/.venv/bin/geoparquet-mcp-server"
 ```
 
+Or skip both steps: `./scripts/serve.sh config` prepares `.venv/` if it is not
+there yet and prints the whole block below with the absolute path already
+filled in.
+
 ## Configure
 
 Edit `~/Library/Application Support/Claude/claude_desktop_config.json` on
@@ -112,10 +116,15 @@ trailing comma, or a relative `command`. Claude Desktop's logs are in
 
 ```bash
 /absolute/path/to/.venv/bin/geoparquet-mcp-server --transport stdio
+# from a clone, the same thing: ./scripts/serve.sh stdio
 ```
 
 It should sit silently waiting for JSON-RPC on stdin. If it exits with a
 traceback instead, the environment is the problem, not the configuration.
+A server that starts and lists its tools but fails every call is a different
+fault: the perimeter was never installed. Both stdio entry points resolve and
+install it before serving, and `tests/test_cli.py` drives each of them over its
+own pipes to keep that true.
 
 **Queries fail with an HTTP 404 from the bucket.** The pinned Overture release
 has expired. Remove `GEOPARQUET_RELEASE` and the server discovers the current
@@ -127,7 +136,8 @@ The same server also runs as an ASGI sub-application inside the FastAPI app,
 in one process, sharing its DuckDB session:
 
 ```bash
-uvicorn geoparquet_mcp.app:create_app --factory --port 8000
+./scripts/serve.sh http --port 8000
+# without the script: uvicorn geoparquet_mcp.app:create_app --factory --port 8000
 ```
 
 - MCP, streamable HTTP: `POST http://127.0.0.1:8000/mcp`
