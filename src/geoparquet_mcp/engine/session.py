@@ -13,6 +13,7 @@ is a first-class part of every result rather than a debugging aid.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections.abc import Iterator
@@ -46,6 +47,16 @@ DEFAULT_HTTP_RETRIES = 3
 
 # Hard cap on rows returned to the client, whatever an operation asks for.
 MAX_ROW_LIMIT = 1000
+
+# DuckDB prefixes its statement echo with this, on its own line.
+_SQL_ECHO = re.compile(r"^LINE \d+:", re.MULTILINE)
+
+
+def _without_sql_echo(text: str) -> str:
+    """Everything DuckDB said before it quoted the statement back."""
+    match = _SQL_ECHO.search(text)
+    return text[: match.start()].strip() if match else text
+
 
 # Bytes attributable to one measurement window: GET responses logged against
 # this connection, after this measurement's watermark. See `Session.measure`.
@@ -328,8 +339,18 @@ def clamp_limit(limit: int) -> int:
 
 
 def _explain_duckdb_error(exc: duckdb.Error) -> str:
-    """Turn a DuckDB failure into something a caller can act on."""
-    text = str(exc).strip()
+    """Turn a DuckDB failure into something a caller can act on.
+
+    DuckDB echoes the failing statement back under a `LINE n:` marker. That
+    echo is cut here, because the statement contains the resolved scan target
+    and a caller is never given one: every operation takes a dataset *name*
+    and asks the scope for the path. Leaking it in an error message would hand
+    back the one string the perimeter exists to keep out of a caller's reach —
+    and it adds nothing, since the diagnosis above it is the actionable part.
+    The full SQL is still attached to `RemoteReadError.sql`, where an operator
+    reading a log can reach it and a caller cannot.
+    """
+    text = _without_sql_echo(str(exc).strip())
     lowered = text.lower()
     if "http error" in lowered or "404" in lowered:
         return (

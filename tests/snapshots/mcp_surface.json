@@ -1,0 +1,563 @@
+{
+  "resource_templates": [
+    {
+      "description": "Catalogue entry for a single remote GeoParquet source.",
+      "mime_type": "application/json",
+      "name": "source_entry",
+      "uri_template": "geoparquet://sources/{source}"
+    },
+    {
+      "description": "Column schema, types, coordinate reference system, row count and geographic extent of one dataset, read from Parquet footer metadata without scanning any data. The read-only form of geoparquet_describe_source.",
+      "mime_type": "application/json",
+      "name": "source_schema",
+      "uri_template": "geoparquet://sources/{source}/schema"
+    }
+  ],
+  "resources": [
+    {
+      "description": "Every remote GeoParquet dataset this server can query, with licence, current release path, geometry and category columns, and approximate size. Read this first: it is the list of names every tool accepts.",
+      "mime_type": "application/json",
+      "name": "source_catalog",
+      "uri": "geoparquet://sources"
+    }
+  ],
+  "server": {
+    "instructions": "Spatial analysis over remote GeoParquet files, read in place by DuckDB.\n\nNothing is imported or downloaded first: each tool issues HTTP range requests\nagainst public object storage and reads only the row groups and columns its\nfilters need. A 10 GB dataset is queryable in seconds without a database.\n\nStart by reading the `geoparquet://sources` resource — the catalogue of\ndatasets, and the names every tool accepts. Then call\n`geoparquet_describe_source` to learn the real column names, the coordinate\nsystem and the extent the dataset covers. Overture nests its columns, so a\ncategory is `categories.primary` and a label is `names.primary`; guessing them\ncosts a wasted call.\n\nThen pick the tool that matches the shape of the answer you need:\n  - `geoparquet_preview_rows` to see what the values look like before filtering;\n  - `geoparquet_filter_spatial` for the features themselves, as GeoJSON, inside\n    a rectangle or an arbitrary WKT geometry;\n  - `geoparquet_find_nearest` for what is closest to a point, with distances;\n  - `geoparquet_aggregate_attribute` for \"how many of each\" and \"what is the\n    average\", computed remotely;\n  - `geoparquet_summarize_h3` for where things are densest;\n  - `geoparquet_count_in_polygons` for \"how many in each district\", which is\n    the one tool that reads two datasets at once;\n  - `geoparquet_run_sql` last, for a join or a window function the others\n    cannot express.\n\nTwo habits decide whether a question costs kilobytes or gigabytes.\n\nAlways pass the tightest bounding box the question allows. The rectangle is\nwhat makes the read cheap: it is pushed into the Parquet file and prunes whole\nrow groups before any byte is fetched, so a wide box costs far more than a\nnarrow one.\n\nPrefer an aggregate over fetching features whenever the question allows it.\nCounting a million places remotely returns a few rows; fetching them to count\nthem locally returns a million.\n\nEvery result carries a `scan` block reporting the bytes that actually crossed\nthe network — read it, and tighten the query if it looks large.\n",
+    "name": "geoparquet-mcp",
+    "version": "0.1.0"
+  },
+  "tools": [
+    {
+      "description": "Group the rows of a dataset by one column and aggregate them, optionally inside a lon/lat rectangle. The grouping runs inside the remote file.\n\nWHEN TO USE IT. For \"how many of each\", \"what is the average\", \"which is the most common\" — any question whose answer is a table of groups rather than a set of features. This is the tool that makes a 10 GB dataset answerable in kilobytes: the grouping happens remotely and only the group rows cross the network, however many rows went into them. Reach for it before `geoparquet_filter_spatial` whenever counting would do.\n\nPARAMETERS.\n  source: dataset name.\n  group_by: the column whose distinct values become the groups, for example 'categories.primary'.\n  aggregate: one of count, sum, avg, min, max. Default count.\n  measure: the column to aggregate. Required for sum, avg, min and max, and rejected for count, which counts rows. It must be numeric; a non-numeric one is refused before any byte is fetched.\n  min_lon, min_lat, max_lon, max_lat: restrict the aggregate to a rectangle. Pass all four or none. Omitting them aggregates the entire dataset, which reads the grouped and measured columns in full — slow and expensive on a multi-gigabyte source. Pass a box unless you truly mean the whole world.\n  limit: maximum groups returned, ordered by the aggregate descending.\n\nWHAT COMES BACK. `groups`, each with `group_value`, `value` (the aggregate) and `row_count` (rows in the group); `rows_aggregated`; `truncated`; the `sql` that ran; and the `scan` block.",
+      "input_schema": {
+        "properties": {
+          "aggregate": {
+            "default": "count",
+            "title": "Aggregate",
+            "type": "string"
+          },
+          "group_by": {
+            "title": "Group By",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "max_lat": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Lat"
+          },
+          "max_lon": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Lon"
+          },
+          "measure": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Measure"
+          },
+          "min_lat": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Min Lat"
+          },
+          "min_lon": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Min Lon"
+          },
+          "source": {
+            "default": "overture_places",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "group_by"
+        ],
+        "title": "aggregate_attributeArguments",
+        "type": "object"
+      },
+      "name": "geoparquet_aggregate_attribute",
+      "output_schema": {
+        "additionalProperties": true,
+        "title": "aggregate_attributeDictOutput",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Count how many features of one dataset fall inside each polygon of another: a point-in-polygon join between two remote datasets, restricted to a rectangle.\n\nWHEN TO USE IT. For \"how many of these are in each district\", \"which neighbourhood has the most of them\", \"break this down by administrative area\" — any question whose answer is a table of areas with a number against each. It is the only tool that reads two datasets at once, and the only way to group by something that is not a column but a shape.\n\nUse `geoparquet_aggregate_attribute` instead when you can group by a column the dataset already carries; it is much cheaper. Use this one when the grouping is geographic and the boundaries live in a different file.\n\nCOST. This is the most expensive tool here, and knowingly so: the rectangle prunes both datasets before the join, but the containment test still has to decode real geometry on both sides. Expect tens of megabytes and tens of seconds on a city-sized box, against single-digit megabytes for the other tools. Keep the rectangle tight, and prefer a narrower `polygon_subtype`.\n\nPARAMETERS.\n  min_lon, min_lat, max_lon, max_lat: the rectangle, in WGS 84 degrees. All four are required — this tool has no whole-world mode.\n  point_source: the dataset being counted.\n  polygon_source: the dataset providing the containing areas. It must be a polygonal dataset; a point dataset is refused before anything is read.\n  polygon_subtype: narrows the polygon side to one administrative level, for example 'locality' or 'county'. Without it a country-sized polygon is returned alongside a neighbourhood one, because both overlap the rectangle, and the counts are then not comparable to each other.\n  limit: maximum polygons returned, ordered by count descending.\n\nWHAT COMES BACK. `polygons`, each with `polygon_name`, `polygon_subtype` and `feature_count`; the `sql` that ran; and the `scan` block. The count is the number of features whose geometry is contained by that polygon, not merely overlapping its bounding box.",
+      "input_schema": {
+        "properties": {
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "max_lat": {
+            "title": "Max Lat",
+            "type": "number"
+          },
+          "max_lon": {
+            "title": "Max Lon",
+            "type": "number"
+          },
+          "min_lat": {
+            "title": "Min Lat",
+            "type": "number"
+          },
+          "min_lon": {
+            "title": "Min Lon",
+            "type": "number"
+          },
+          "point_source": {
+            "default": "overture_places",
+            "title": "Point Source",
+            "type": "string"
+          },
+          "polygon_source": {
+            "default": "overture_divisions",
+            "title": "Polygon Source",
+            "type": "string"
+          },
+          "polygon_subtype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Polygon Subtype"
+          }
+        },
+        "required": [
+          "min_lon",
+          "min_lat",
+          "max_lon",
+          "max_lat"
+        ],
+        "title": "count_in_polygonsArguments",
+        "type": "object"
+      },
+      "name": "geoparquet_count_in_polygons",
+      "output_schema": {
+        "additionalProperties": true,
+        "title": "count_in_polygonsDictOutput",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Describe one remote dataset without reading any of its data: column names and types, the geometry and bbox columns, the coordinate reference system, the exact row count, the number of Parquet parts and row groups, the total remote size, and the geographic extent the dataset covers.\n\nWHEN TO USE IT. Call this before your first filter against a dataset. It is how you learn the real column names — Overture nests many of them, so a category is `categories.primary` and a label is `names.primary`, not `category` and `name` — and how you check that the region you care about is inside `extent` before spending a query on it.\n\nPARAMETERS.\n  source: dataset name, from the `geoparquet://sources` resource or the default. Every other tool takes the same name.\n\nWHAT COMES BACK. `columns` is a list of {name, type, role}, where role marks the geometry, bbox, name, category and confidence columns. `crs` is the coordinate reference system (OGC:CRS84 means plain longitude/latitude degrees, which is what every tool here expects) and `crs_is_default` says whether the file stated it or inherited the GeoParquet default. `extent` is the dataset's bounding box, computed from row-group statistics, or null when the file carries no statistics to compute it from. `row_count`, `remote_files`, `row_groups` and `remote_bytes` describe the physical file. `scan` reports the bytes this call itself pulled: Parquet footers only, never a data page. On Overture places that is about 26 MB the first time — the footers of 16 parts carrying 4096 row groups of statistics — and zero afterwards, because the session caches them. Either way it is metadata about a 10.5 GB file, not the file.",
+      "input_schema": {
+        "properties": {
+          "source": {
+            "default": "overture_places",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "title": "describe_sourceArguments",
+        "type": "object"
+      },
+      "name": "geoparquet_describe_source",
+      "output_schema": {
+        "additionalProperties": true,
+        "title": "describe_sourceDictOutput",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Return the features of a dataset that fall inside an area, as a GeoJSON FeatureCollection. The area is either a lon/lat rectangle or an arbitrary WKT geometry.\n\nWHEN TO USE IT. When the answer is the features themselves — \"which cafes are in this neighbourhood\", \"give me the buildings along this street\" — and you intend to look at them individually. When you only need a count, a ranking or a distribution, use `geoparquet_aggregate_attribute` or `geoparquet_summarize_h3` instead: they answer from the remote file and transfer kilobytes instead of features.\n\nCOST. The rectangle is what makes the read cheap. It is pushed into the remote Parquet file and prunes whole row groups from their footer statistics before any byte of data is fetched, so a tight box costs far less than a wide one — this is the difference between megabytes and gigabytes, not a micro-optimisation. Always pass the tightest area the question allows.\n\nPARAMETERS.\n  source: dataset name.\n  min_lon, min_lat, max_lon, max_lat: the rectangle, in WGS 84 degrees. Pass all four, or none if you are using `wkt`.\n  wkt: an arbitrary geometry instead of a rectangle, for example 'POLYGON ((2.33 48.85, 2.36 48.85, 2.36 48.87, 2.33 48.87, 2.33 48.85))'. Its envelope prunes the read and the exact shape then filters the survivors, so the answer is exact. Give either a rectangle or a `wkt`, never both.\n  category: exact match on the dataset's category column, for example 'restaurant'. Preview the column first — the vocabulary is not obvious.\n  name_contains: case-insensitive substring of the feature name.\n  min_confidence: 0 to 1, Overture's own confidence in the record. 0.8 drops most questionable entries.\n  columns: column expressions to return. A narrow projection is worth as much as a tight box, because Parquet is columnar and unread columns are unfetched.\n  include_geometry: false skips the geometry column — the widest in the file — and approximates each feature by its bounding-box corner, which is exact for points. Ignored when `wkt` is used, since the exact test needs the geometry.\n  limit: maximum features, capped at 1000.\n\nWHAT COMES BACK. `geojson` as a FeatureCollection; `feature_count` and `truncated`, which tells you the limit was reached and there is more; `geometry_is_exact`; the `sql` that ran; and `scan` with `bytes_scanned` — read it, and tighten the area if it looks large.",
+      "input_schema": {
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Category"
+          },
+          "columns": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Columns"
+          },
+          "include_geometry": {
+            "default": true,
+            "title": "Include Geometry",
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "max_lat": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Lat"
+          },
+          "max_lon": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Lon"
+          },
+          "min_confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Min Confidence"
+          },
+          "min_lat": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Min Lat"
+          },
+          "min_lon": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Min Lon"
+          },
+          "name_contains": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Name Contains"
+          },
+          "source": {
+            "default": "overture_places",
+            "title": "Source",
+            "type": "string"
+          },
+          "wkt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Wkt"
+          }
+        },
+        "title": "filter_spatialArguments",
+        "type": "object"
+      },
+      "name": "geoparquet_filter_spatial",
+      "output_schema": {
+        "additionalProperties": true,
+        "title": "filter_spatialDictOutput",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Return the features closest to a point, nearest first, each with its great-circle distance in kilometres.\n\nWHEN TO USE IT. For \"what is near here\" and \"which is the closest\" — the questions where the ranking and the distance are the answer. Use `geoparquet_filter_spatial` instead when you want everything in an area rather than the closest few.\n\nHOW IT STAYS CHEAP. A radius is not something Parquet statistics can prune on, so the search circle is first widened to its bounding rectangle, which is prunable; the exact distance is then computed only over the rows that survive, and used both to filter and to order. A large radius therefore costs a large read: prefer the smallest radius that can contain the answer, and widen it only if you come back empty.\n\nPARAMETERS.\n  source: dataset name.\n  lon, lat: the centre point, in WGS 84 degrees. Longitude first.\n  radius_km: how far to look, up to 500. Results outside it are excluded, so this is a filter, not just a hint.\n  category, name_contains: the same narrowing as `geoparquet_filter_spatial`.\n  columns: column expressions to return.\n  limit: how many neighbours, capped at 1000.\n\nWHAT COMES BACK. `rows`, ordered nearest first, each carrying `distance_km`; the `search_bbox` actually used for pruning; and the `scan` block.",
+      "input_schema": {
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Category"
+          },
+          "columns": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Columns"
+          },
+          "lat": {
+            "title": "Lat",
+            "type": "number"
+          },
+          "limit": {
+            "default": 20,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "lon": {
+            "title": "Lon",
+            "type": "number"
+          },
+          "name_contains": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Name Contains"
+          },
+          "radius_km": {
+            "default": 1.0,
+            "title": "Radius Km",
+            "type": "number"
+          },
+          "source": {
+            "default": "overture_places",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "lon",
+          "lat"
+        ],
+        "title": "find_nearestArguments",
+        "type": "object"
+      },
+      "name": "geoparquet_find_nearest",
+      "output_schema": {
+        "additionalProperties": true,
+        "title": "find_nearestDictOutput",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Return the first few rows of a dataset, so you can see what the values actually look like.\n\nWHEN TO USE IT. After `geoparquet_describe_source` tells you a column exists and before you filter on it, to learn how it is populated: what a category string looks like in practice, whether a field is mostly null, how an address is spelled. Guessing a filter value and getting zero features back costs more than one preview.\n\nThis is NOT a spatial question. The rows are whatever the file stores first, in no geographic order and in no ranking — do not read them as \"the most important places\" or \"places near anywhere\". To ask where things are, use `geoparquet_filter_spatial` or `geoparquet_find_nearest`.\n\nPARAMETERS.\n  source: dataset name.\n  columns: column expressions to return, for example [\"id\", \"names.primary\", \"confidence\"]. Omit for the dataset's default projection.\n  limit: how many rows, 1 to 100. Ten is usually enough to see the shape.\n\nWHAT COMES BACK. `rows` as plain records, `columns_returned` naming the keys, and the `scan` block. The read stops at the first row group of the first part file, so the cost does not grow with the dataset.",
+      "input_schema": {
+        "properties": {
+          "columns": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Columns"
+          },
+          "limit": {
+            "default": 10,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "source": {
+            "default": "overture_places",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "title": "preview_rowsArguments",
+        "type": "object"
+      },
+      "name": "geoparquet_preview_rows",
+      "output_schema": {
+        "additionalProperties": true,
+        "title": "preview_rowsDictOutput",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Run one read-only SELECT against the datasets in scope, for questions the other tools do not have a shape for.\n\nWHEN TO USE IT. Last, not first. The typed tools push their filters into the remote Parquet file by construction; an ad-hoc query pushes down only what its WHERE clause happens to express, so a query that forgets a bbox predicate can read gigabytes to answer something `geoparquet_aggregate_attribute` would have answered in kilobytes. Reach for it for genuine gaps: a join between two datasets, a HAVING clause, a window function, a self-join.\n\nWHAT YOU CAN QUERY. Each dataset in scope is a table named exactly as the dataset is — `overture_places`, `overture_divisions`, `overture_buildings` — and those are the only tables that exist. There is no way to name a file: table functions such as read_parquet are refused, and so is anything that is not a single SELECT. That is a perimeter, not a lint rule.\n\nWRITING A FAST ONE. Constrain `bbox` explicitly, as four comparisons on its members, because that is the form Parquet statistics can prune on:\n\n  SELECT categories.primary AS category, count(*) AS n\n  FROM overture_places\n  WHERE bbox.xmin <= 2.40 AND bbox.xmax >= 2.30\n    AND bbox.ymin <= 48.88 AND bbox.ymax >= 48.85\n  GROUP BY 1 ORDER BY n DESC\n\nWriting that filter with a geometry function instead would be correct and would read the entire file, because the Parquet reader cannot see through it. Select named columns rather than *, for the same reason: unread columns are unfetched.\n\nPARAMETERS.\n  sql: one SELECT statement.\n  max_rows: row ceiling, applied as an outer LIMIT. Hard, and capped at 1000.\n  max_bytes: byte ceiling. Reported, not pre-emptive — see below.\n\nWHAT COMES BACK. `rows`, `tables_read`, the `executed_sql` actually run, the `scan` block, and `byte_budget_exceeded`. That last one is a verdict after the fact, not a brake: DuckDB cannot abort a scan on bytes already transferred, so the rows are returned — they have been paid for — and the flag tells you the query was too expensive and the next one should be narrower. The row ceiling, by contrast, is enforced.",
+      "input_schema": {
+        "properties": {
+          "max_bytes": {
+            "default": 200000000,
+            "title": "Max Bytes",
+            "type": "integer"
+          },
+          "max_rows": {
+            "default": 100,
+            "title": "Max Rows",
+            "type": "integer"
+          },
+          "sql": {
+            "title": "Sql",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "title": "run_sqlArguments",
+        "type": "object"
+      },
+      "name": "geoparquet_run_sql",
+      "output_schema": {
+        "additionalProperties": true,
+        "title": "run_sqlDictOutput",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Bin the features inside a rectangle into H3 hexagonal cells and return the count per cell. A density map, computed remotely.\n\nWHEN TO USE IT. For \"where are these densest\", \"how is this spread across the city\", and anything you would answer with a heatmap. The binning and counting happen inside the remote file, so the answer is a few hundred cells whether they cover a thousand features or ten million — you never transfer the features to find out where they cluster.\n\nPARAMETERS.\n  source: dataset name.\n  min_lon, min_lat, max_lon, max_lat: the rectangle to bin, in WGS 84 degrees. All four are required; this tool has no whole-world mode by design.\n  resolution: the H3 level, 0 to 15. 0 is continent-sized, 6 is a city, 8 is roughly a neighbourhood, 9 a block, 11 a building. Choosing too fine a resolution for a wide box returns thousands of near-empty cells; start at 8 for a city and adjust.\n  limit: maximum cells, ordered by count descending, so the limit keeps the hotspots.\n  include_cell_centre: adds the latitude and longitude of each cell's centre, which is what you need to plot the result.\n\nWHAT COMES BACK. `cells`, each with `h3_cell` (the canonical hexadecimal id), `feature_count` and optionally the centre; plus `features_binned`, `truncated`, and the `scan` block.\n\nFeatures are binned on their bounding-box centre rather than their true geometry, which avoids fetching the widest column in the file: exact for point datasets, the envelope's centre for polygonal ones. Requires DuckDB's H3 extension; if it cannot be loaded the tool says so rather than falling back to something slower.",
+      "input_schema": {
+        "properties": {
+          "include_cell_centre": {
+            "default": true,
+            "title": "Include Cell Centre",
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 200,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "max_lat": {
+            "title": "Max Lat",
+            "type": "number"
+          },
+          "max_lon": {
+            "title": "Max Lon",
+            "type": "number"
+          },
+          "min_lat": {
+            "title": "Min Lat",
+            "type": "number"
+          },
+          "min_lon": {
+            "title": "Min Lon",
+            "type": "number"
+          },
+          "resolution": {
+            "default": 8,
+            "title": "Resolution",
+            "type": "integer"
+          },
+          "source": {
+            "default": "overture_places",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "min_lon",
+          "min_lat",
+          "max_lon",
+          "max_lat"
+        ],
+        "title": "summarize_h3Arguments",
+        "type": "object"
+      },
+      "name": "geoparquet_summarize_h3",
+      "output_schema": {
+        "additionalProperties": true,
+        "title": "summarize_h3DictOutput",
+        "type": "object"
+      }
+    }
+  ]
+}

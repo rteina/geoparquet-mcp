@@ -144,8 +144,9 @@ def _register_error_handlers(app: FastAPI) -> None:
         status = next(
             (code for kind, code in _STATUS_BY_ERROR.items() if isinstance(exc, kind)), 502
         )
-        return JSONResponse(status_code=status, content={"error": type(exc).__name__,
-                                                         "detail": str(exc)})
+        return JSONResponse(
+            status_code=status, content={"error": type(exc).__name__, "detail": str(exc)}
+        )
 
 
 def _register_routes(app: FastAPI, config: AppConfig) -> None:
@@ -210,9 +211,17 @@ def _register_routes(app: FastAPI, config: AppConfig) -> None:
     ) -> dict[str, Any]:
         """Features inside a rectangle or WKT geometry. Mirrors `geoparquet_filter_spatial`."""
         return engine.spatial_filter(
-            source=source, min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat,
-            wkt=wkt, category=category, name_contains=name_contains,
-            min_confidence=min_confidence, include_geometry=include_geometry, limit=limit,
+            source=source,
+            min_lon=min_lon,
+            min_lat=min_lat,
+            max_lon=max_lon,
+            max_lat=max_lat,
+            wkt=wkt,
+            category=category,
+            name_contains=name_contains,
+            min_confidence=min_confidence,
+            include_geometry=include_geometry,
+            limit=limit,
             **deps.kwargs,
         )
 
@@ -228,8 +237,13 @@ def _register_routes(app: FastAPI, config: AppConfig) -> None:
     ) -> dict[str, Any]:
         """Closest features to a point. Mirrors `geoparquet_find_nearest`."""
         return engine.nearest(
-            lon=lon, lat=lat, radius_km=radius_km, source=source, category=category,
-            limit=limit, **deps.kwargs,
+            lon=lon,
+            lat=lat,
+            radius_km=radius_km,
+            source=source,
+            category=category,
+            limit=limit,
+            **deps.kwargs,
         )
 
     @app.get("/query/aggregate", tags=["spatial"])
@@ -247,9 +261,16 @@ def _register_routes(app: FastAPI, config: AppConfig) -> None:
     ) -> dict[str, Any]:
         """Grouped aggregate over a dataset. Mirrors `geoparquet_aggregate_attribute`."""
         return engine.attribute_aggregate(
-            group_by=group_by, source=source, aggregate=aggregate, measure=measure,
-            min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat,
-            limit=limit, **deps.kwargs,
+            group_by=group_by,
+            source=source,
+            aggregate=aggregate,
+            measure=measure,
+            min_lon=min_lon,
+            min_lat=min_lat,
+            max_lon=max_lon,
+            max_lat=max_lat,
+            limit=limit,
+            **deps.kwargs,
         )
 
     @app.get("/query/h3", tags=["spatial"])
@@ -265,8 +286,14 @@ def _register_routes(app: FastAPI, config: AppConfig) -> None:
     ) -> dict[str, Any]:
         """H3 density bins over a rectangle. Mirrors `geoparquet_summarize_h3`."""
         return engine.h3_aggregate(
-            min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat,
-            resolution=resolution, source=source, limit=limit, **deps.kwargs,
+            min_lon=min_lon,
+            min_lat=min_lat,
+            max_lon=max_lon,
+            max_lat=max_lat,
+            resolution=resolution,
+            source=source,
+            limit=limit,
+            **deps.kwargs,
         )
 
     @app.get("/query/in-polygons", tags=["spatial"])
@@ -283,11 +310,16 @@ def _register_routes(app: FastAPI, config: AppConfig) -> None:
     ) -> dict[str, Any]:
         """Point-in-polygon counts. Mirrors `geoparquet_count_in_polygons`."""
         return engine.point_in_polygon(
-            min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat,
-            point_source=point_source, polygon_source=polygon_source,
-            polygon_subtype=polygon_subtype, limit=limit, **deps.kwargs,
+            min_lon=min_lon,
+            min_lat=min_lat,
+            max_lon=max_lon,
+            max_lat=max_lat,
+            point_source=point_source,
+            polygon_source=polygon_source,
+            polygon_subtype=polygon_subtype,
+            limit=limit,
+            **deps.kwargs,
         )
-
 
     if not config.mcp_enabled:
         logger.info("MCP is disabled; no sub-application was mounted")

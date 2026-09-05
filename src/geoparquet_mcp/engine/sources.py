@@ -26,11 +26,13 @@ failing.
 
 from __future__ import annotations
 
+import re
 import urllib.request
 import xml.etree.ElementTree as ElementTree
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from types import MappingProxyType
 
 from geoparquet_mcp.engine.errors import ScopeViolationError, UnknownSourceError
@@ -40,12 +42,47 @@ OVERTURE_BUCKET = "overturemaps-us-west-2"
 OVERTURE_REGION = "us-west-2"
 OVERTURE_HTTPS_ENDPOINT = f"https://{OVERTURE_BUCKET}.s3.{OVERTURE_REGION}.amazonaws.com"
 
+# Where releases live. A source's `root` defaults to this; a test corpus sets
+# it to a local directory so the same operations run against the same layout
+# with no network. Nothing else about a source changes.
+OVERTURE_ROOT = f"s3://{OVERTURE_BUCKET}/release"
+
 # Verified reachable and queryable on 2026-09-05 with DuckDB 1.5.5 + httpfs.
 # Overture retains only the two most recent releases, so treat this as a
 # default rather than a guarantee: resolve_release() falls back to discovery.
 OVERTURE_PINNED_RELEASE = "2026-08-19.0"
 
 _S3_NS = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+
+# `scheme://` at the head of a path. Used to tell an object-storage URL, where
+# a string prefix is the whole truth, from a filesystem path, where it is not.
+_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+
+
+def _within_prefix(path: str, prefix: str) -> bool:
+    """True when `path` really lies under `prefix`.
+
+    For an object-storage URL the string comparison is the whole truth: a key
+    namespace is flat and has no links, so a key that starts with the prefix
+    is under it, full stop.
+
+    A filesystem path is different, and the difference is the point. A symlink
+    planted inside the perimeter has a name that starts with the prefix and a
+    target that does not, so comparing strings would let it through and the
+    engine would read whatever it pointed at. Both sides are resolved before
+    comparing, which also settles the mundane case of the root itself sitting
+    behind a link — /tmp is one on macOS.
+    """
+    if not path.startswith(prefix):
+        return False
+    if _URL_SCHEME.match(prefix):
+        return True
+    try:
+        resolved = Path(path).resolve()
+        root = Path(prefix).resolve()
+    except OSError:  # pragma: no cover - a path the OS refuses to resolve
+        return False
+    return root in resolved.parents
 
 
 @dataclass(frozen=True)
@@ -71,6 +108,8 @@ class Source:
     name_column: str | None = "names.primary"
     # Column carrying a classification, when the dataset has one.
     category_column: str | None = None
+    # Column carrying a per-record confidence in 0..1, when the dataset has one.
+    confidence_column: str | None = None
     # True when the dataset holds areal geometry, so it can be the polygon
     # side of a point-in-polygon join.
     polygonal: bool = False
@@ -78,17 +117,26 @@ class Source:
     approximate_rows: int | None = None
     approximate_bytes: int | None = None
     notes: str = ""
+    # The storage root the releases sit under. Overture's public bucket by
+    # default; a local directory for a test corpus laid out the same way.
+    root: str = OVERTURE_ROOT
 
     def prefix(self, release: str) -> str:
         """The object-storage folder holding this source's Parquet parts."""
-        return f"s3://{OVERTURE_BUCKET}/release/{release}/theme={self.theme}/type={self.subtype}/"
+        return f"{self.root}/{release}/theme={self.theme}/type={self.subtype}/"
 
     def scan_target(self, release: str) -> str:
         """The `read_parquet()` argument for this source at a given release."""
         return f"{self.prefix(release)}*.parquet"
 
     def https_prefix(self, release: str) -> str:
-        """The same location as a plain HTTPS URL, for humans and curl."""
+        """The same location as a plain HTTPS URL, for humans and curl.
+
+        Only meaningful for a source on the public bucket; anything else is
+        already a path a human can open, so it is returned as it is.
+        """
+        if self.root != OVERTURE_ROOT:
+            return self.prefix(release)
         return (
             f"{OVERTURE_HTTPS_ENDPOINT}/release/{release}/theme={self.theme}/type={self.subtype}/"
         )
@@ -107,6 +155,7 @@ SOURCES: dict[str, Source] = {
         theme="places",
         subtype="place",
         category_column="categories.primary",
+        confidence_column="confidence",
         default_columns=(
             "id",
             "names.primary AS name",
@@ -299,14 +348,15 @@ class DatasetScope:
         The guard for the one code path that handles a path rather than a
         name. It compares against prefixes this scope built itself, so a
         crafted URL — another bucket, another release, a parent-directory
-        escape — cannot pass.
+        escape — cannot pass, and a filesystem path is resolved first so a
+        symlink pointing out of the perimeter cannot either.
         """
         if ".." in path or not path.endswith(".parquet"):
             raise ScopeViolationError(
                 f"refusing to read {path!r}: only .parquet objects inside the scope are readable"
             )
         for source in self.sources.values():
-            if path.startswith(source.prefix(self.release)):
+            if _within_prefix(path, source.prefix(self.release)):
                 return path
         raise ScopeViolationError(
             f"refusing to read {path!r}: outside the scope "

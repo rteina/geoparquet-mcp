@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,9 +18,9 @@ from fastapi.testclient import TestClient
 from geoparquet_mcp import dependencies
 from geoparquet_mcp.app import create_app
 from geoparquet_mcp.config import AppConfig
+from mcp_client import MCP_HEADERS, PROTOCOL_VERSION, McpClient, _rpc
 
 RELEASE = "2026-08-19.0"
-PROTOCOL_VERSION = "2025-06-18"
 
 # TestClient sends Host: testserver, which the transport's DNS-rebinding
 # protection rejects with 421 unless it is named. Naming it here is the same
@@ -32,83 +31,6 @@ TEST_CONFIG = AppConfig(
     release=RELEASE,
     allowed_hosts=("testserver",),
 )
-
-MCP_HEADERS = {
-    "Accept": "application/json, text/event-stream",
-    "Content-Type": "application/json",
-}
-
-
-def _rpc(method: str, params: dict[str, Any] | None = None, request_id: int = 1) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}
-
-
-def _payload(response: Any) -> dict[str, Any]:
-    """One JSON-RPC result, however the transport chose to frame it.
-
-    Streamable HTTP may answer with a plain JSON body or with a single
-    server-sent event; a test that only understood one of them would break on
-    a transport setting rather than on a bug.
-    """
-    body = response.text
-    if response.headers.get("content-type", "").startswith("text/event-stream"):
-        for line in body.splitlines():
-            if line.startswith("data: "):
-                body = line.removeprefix("data: ")
-                break
-    return json.loads(body)
-
-
-class McpClient:
-    """The smallest streamable-HTTP client that can hold a session."""
-
-    def __init__(self, http: TestClient, path: str = "/mcp") -> None:
-        self._http = http
-        self._path = path
-        self._headers = dict(MCP_HEADERS)
-        self._id = 0
-
-    def _post(self, message: dict[str, Any]) -> Any:
-        return self._http.post(self._path, json=message, headers=self._headers)
-
-    def initialize(self) -> dict[str, Any]:
-        response = self._post(
-            _rpc(
-                "initialize",
-                {
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": {"name": "pytest", "version": "0"},
-                },
-            )
-        )
-        response.raise_for_status()
-        session = response.headers.get("mcp-session-id")
-        if session:
-            self._headers["mcp-session-id"] = session
-        self._headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
-        self._http.post(
-            self._path,
-            json={"jsonrpc": "2.0", "method": "notifications/initialized"},
-            headers=self._headers,
-        )
-        return _payload(response)["result"]
-
-    def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        self._id += 1
-        response = self._post(_rpc(method, params, request_id=self._id))
-        response.raise_for_status()
-        document = _payload(response)
-        assert "error" not in document, document["error"]
-        return document["result"]
-
-    def tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Call a tool and return its structured result."""
-        result = self.call("tools/call", {"name": name, "arguments": arguments})
-        assert not result.get("isError"), result
-        if result.get("structuredContent") is not None:
-            return result["structuredContent"]
-        return json.loads(result["content"][0]["text"])
 
 
 @pytest.fixture
@@ -310,9 +232,7 @@ def test_the_same_question_gets_the_same_answer_over_both_protocols(
 
 
 @pytest.mark.network
-def test_both_protocols_read_through_the_same_session(
-    client: TestClient, mcp: McpClient
-) -> None:
+def test_both_protocols_read_through_the_same_session(client: TestClient, mcp: McpClient) -> None:
     """Not just the same answer — the same cache, which means the same process.
 
     A second read of a region the first call already fetched costs no bytes.

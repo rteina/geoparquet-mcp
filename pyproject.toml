@@ -55,6 +55,12 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.isort]
+# `corpus` and `mcp_client` are test-suite modules, imported by their bare
+# names because pytest puts `tests/` on the path. They belong with the
+# project's own imports, not with third-party ones.
+known-first-party = ["geoparquet_mcp", "corpus", "mcp_client"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["network: test that reads the remote dataset over HTTP"]

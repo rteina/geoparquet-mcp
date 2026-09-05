@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # The remote-dataset job below runs on this, and only on this. Overture
+  # publishes roughly monthly and keeps two releases, so a weekly check is
+  # early enough to notice a pinned release expiring.
+  schedule:
+    - cron: "17 6 * * 1"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # --frozen, not --locked: a fresh clone must resolve to exactly what
+      # uv.lock records, or CI is testing a dependency set nobody else has.
+      - name: Install the project
+        run: uv sync --frozen --extra dev --python ${{ matrix.python-version }}
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      # `-m "not network"`: the excluded tests read Overture's public bucket,
+      # take about two minutes, and break when a release expires. Everything
+      # they cover about the engine is covered here against the local Parquet
+      # corpus the suite generates. See `remote` below, and tests/corpus.py.
+      - name: Test
+        run: uv run pytest -m "not network" -q
+
+  remote:
+    name: Remote dataset (Overture)
+    runs-on: ubuntu-latest
+    # Never on a pull request. This job reads a third-party bucket, so it fails
+    # for reasons that have nothing to do with the change under review — an
+    # expired release, a slow morning in us-west-2. It runs on a schedule
+    # instead, where a failure means what it should: the remote dataset moved.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --extra dev
+      - run: uv run pytest -m network -q

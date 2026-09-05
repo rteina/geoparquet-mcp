@@ -79,14 +79,35 @@ def test_bbox_query_returns_geojson_inside_the_box(scope) -> None:
     assert result["scan"]["bytes_scanned"] > 0
 
 
+def _data_bytes(scope, **overrides) -> tuple[dict, int]:
+    """Run one bbox query on a cold session, with the footer read paid separately.
+
+    A cold session must fetch Parquet footers before it can fetch any data, and
+    on Overture places that is about twenty megabytes against a ten-gigabyte
+    file. Counting it inside the measurement puts the same large number on both
+    sides of a comparison and buries the difference being measured — which for
+    fifty rows is a few hundred kilobytes of geometry. So the footer is read
+    first, in its own window, and only the query that follows is compared.
+    This is the same separation `benchmark._run_phase` makes, for the same reason.
+    """
+    session = engine.reset_session()
+    target = scope.target("overture_places")
+    with session.measure() as footer:
+        footer.one(f"SELECT count(*) AS parts FROM parquet_file_metadata('{target}')")
+    result = engine.bbox_query(**PARIS, scope=scope, session=session, limit=50, **overrides)
+    return result, result["scan"]["bytes_scanned"]
+
+
 def test_skipping_the_geometry_column_reads_fewer_bytes(scope) -> None:
     """The projection is worth as much as the filter on a wide dataset."""
-    engine.reset_session()
-    with_geometry = engine.bbox_query(**PARIS, scope=scope, limit=50, include_geometry=True)
-    engine.reset_session()
-    without = engine.bbox_query(**PARIS, scope=scope, limit=50, include_geometry=False)
-    assert without["geometry_is_exact"] is False
-    assert without["scan"]["bytes_scanned"] < with_geometry["scan"]["bytes_scanned"]
+    _, with_geometry = _data_bytes(scope, include_geometry=True)
+    without_result, without = _data_bytes(scope, include_geometry=False)
+    assert without_result["geometry_is_exact"] is False
+    assert with_geometry > 0, "the measured window read nothing at all"
+    assert without < with_geometry, (
+        f"dropping the widest column in the file did not reduce the data read "
+        f"({without} vs {with_geometry} bytes)"
+    )
 
 
 def test_nearest_is_ordered_and_within_the_radius(scope) -> None:

@@ -35,9 +35,10 @@ PARAMETERS.
 default. Every other tool takes the same name.
 
 WHAT COMES BACK. `columns` is a list of {name, type, role}, where role marks \
-the geometry, bbox, name and category columns. `crs` is the coordinate \
-reference system (OGC:CRS84 means plain longitude/latitude degrees, which is \
-what every tool here expects) and `crs_is_default` says whether the file \
+the geometry, bbox, name, category and confidence columns. `crs` is the \
+coordinate reference system (OGC:CRS84 means plain longitude/latitude \
+degrees, which is what every tool here expects) and `crs_is_default` says \
+whether the file \
 stated it or inherited the GeoParquet default. `extent` is the dataset's \
 bounding box, computed from row-group statistics, or null when the file \
 carries no statistics to compute it from. `row_count`, `remote_files`, \

@@ -66,8 +66,7 @@ def _require_single_select(sql: str) -> None:
         raise InvalidRequestError(f"could not parse the SQL: {exc}") from exc
     if len(statements) != 1:
         raise InvalidRequestError(
-            f"expected exactly one statement, got {len(statements)}; "
-            f"run one SELECT at a time"
+            f"expected exactly one statement, got {len(statements)}; run one SELECT at a time"
         )
     # Compared by value, not identity: DuckDB hands back an enum member from
     # its extension module, which is equal to but not the same object as the

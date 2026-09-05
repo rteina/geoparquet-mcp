@@ -164,22 +164,32 @@ def _registered_handlers() -> dict[str, ast.FunctionDef]:
 
 
 def test_every_tool_handler_stays_a_handler() -> None:
-    """Twenty lines, docstring included.
+    """One statement, and it is a `return`. Docstring aside, that is the whole body.
 
     Not a style rule. A tool handler validates nothing, computes nothing and
     formats nothing: it names an engine operation and passes arguments to it.
-    That fits in twenty lines, and the day one does not, the reason is always
-    that logic has drifted out of the engine and into the protocol layer,
-    where it cannot be used or tested without MCP.
+    That is a single `return` expression, and the day one grows a second
+    statement the reason is always that logic has drifted out of the engine
+    and into the protocol layer, where it cannot be used or tested without MCP.
+
+    Counted in statements rather than in lines on purpose. A line count is a
+    proxy for this, and it is a proxy that a code formatter breaks: exploding
+    a call onto one argument per line triples the length of a handler that has
+    gained nothing at all. Counting statements measures the thing the rule is
+    about, and lets `ruff format` own the layout.
     """
-    too_long = {
-        name: node.end_lineno - node.lineno + 1
-        for name, node in _registered_handlers().items()
-        if (node.end_lineno - node.lineno + 1) > 20
-    }
-    assert not too_long, (
-        "these tool handlers have grown past twenty lines, which means they are "
-        f"doing something: {too_long}. Move it into geoparquet_mcp.engine."
+    offenders = {}
+    for name, node in _registered_handlers().items():
+        body = [
+            statement
+            for statement in node.body
+            if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant))
+        ]
+        if len(body) != 1 or not isinstance(body[0], ast.Return):
+            offenders[name] = [type(statement).__name__ for statement in body]
+    assert not offenders, (
+        "these tool handlers do more than name an engine operation and return "
+        f"what it gives back: {offenders}. Move it into geoparquet_mcp.engine."
     )
 
 

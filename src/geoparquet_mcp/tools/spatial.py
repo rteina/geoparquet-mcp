@@ -197,32 +197,56 @@ overlapping its bounding box."""
 
 def filter_spatial(
     source: str = engine.DEFAULT_SOURCE,
-    min_lon: float | None = None, min_lat: float | None = None,
-    max_lon: float | None = None, max_lat: float | None = None,
-    wkt: str | None = None, columns: list[str] | None = None,
-    category: str | None = None, name_contains: str | None = None,
-    min_confidence: float | None = None, include_geometry: bool = True, limit: int = 50,
+    min_lon: float | None = None,
+    min_lat: float | None = None,
+    max_lon: float | None = None,
+    max_lat: float | None = None,
+    wkt: str | None = None,
+    columns: list[str] | None = None,
+    category: str | None = None,
+    name_contains: str | None = None,
+    min_confidence: float | None = None,
+    include_geometry: bool = True,
+    limit: int = 50,
 ) -> dict[str, Any]:
     """Return features intersecting a rectangle or a WKT geometry, as GeoJSON."""
     return engine.spatial_filter(
-        source=source, min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat,
-        wkt=wkt, columns=columns, category=category, name_contains=name_contains,
-        min_confidence=min_confidence, include_geometry=include_geometry, limit=limit,
+        source=source,
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
+        wkt=wkt,
+        columns=columns,
+        category=category,
+        name_contains=name_contains,
+        min_confidence=min_confidence,
+        include_geometry=include_geometry,
+        limit=limit,
         **dependencies.engine_kwargs(),
     )
 
 
 def find_nearest(
-    lon: float, lat: float,
+    lon: float,
+    lat: float,
     radius_km: float = 1.0,
     source: str = engine.DEFAULT_SOURCE,
-    category: str | None = None, name_contains: str | None = None,
-    columns: list[str] | None = None, limit: int = 20,
+    category: str | None = None,
+    name_contains: str | None = None,
+    columns: list[str] | None = None,
+    limit: int = 20,
 ) -> dict[str, Any]:
     """Return the features closest to a point within a radius, nearest first."""
     return engine.nearest(
-        lon=lon, lat=lat, radius_km=radius_km, source=source, category=category,
-        name_contains=name_contains, columns=columns, limit=limit,
+        lon=lon,
+        lat=lat,
+        radius_km=radius_km,
+        source=source,
+        category=category,
+        name_contains=name_contains,
+        columns=columns,
+        limit=limit,
         **dependencies.engine_kwargs(),
     )
 
@@ -230,54 +254,84 @@ def find_nearest(
 def aggregate_attribute(
     group_by: str,
     source: str = engine.DEFAULT_SOURCE,
-    aggregate: str = "count", measure: str | None = None,
-    min_lon: float | None = None, min_lat: float | None = None,
-    max_lon: float | None = None, max_lat: float | None = None,
+    aggregate: str = "count",
+    measure: str | None = None,
+    min_lon: float | None = None,
+    min_lat: float | None = None,
+    max_lon: float | None = None,
+    max_lat: float | None = None,
     limit: int = 50,
 ) -> dict[str, Any]:
     """Group rows by one column and aggregate another, optionally inside a rectangle."""
     return engine.attribute_aggregate(
-        group_by=group_by, source=source, aggregate=aggregate, measure=measure,
-        min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat, limit=limit,
+        group_by=group_by,
+        source=source,
+        aggregate=aggregate,
+        measure=measure,
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
+        limit=limit,
         **dependencies.engine_kwargs(),
     )
 
 
 def summarize_h3(
-    min_lon: float, min_lat: float, max_lon: float, max_lat: float,
+    min_lon: float,
+    min_lat: float,
+    max_lon: float,
+    max_lat: float,
     resolution: int = 8,
     source: str = engine.DEFAULT_SOURCE,
-    limit: int = 200, include_cell_centre: bool = True,
+    limit: int = 200,
+    include_cell_centre: bool = True,
 ) -> dict[str, Any]:
     """Bin features into H3 cells and return the count per cell."""
     return engine.h3_aggregate(
-        min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat,
-        resolution=resolution, source=source, limit=limit,
-        include_cell_centre=include_cell_centre, **dependencies.engine_kwargs(),
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
+        resolution=resolution,
+        source=source,
+        limit=limit,
+        include_cell_centre=include_cell_centre,
+        **dependencies.engine_kwargs(),
     )
 
 
 def count_in_polygons(
-    min_lon: float, min_lat: float, max_lon: float, max_lat: float,
+    min_lon: float,
+    min_lat: float,
+    max_lon: float,
+    max_lat: float,
     point_source: str = engine.DEFAULT_SOURCE,
     polygon_source: str = "overture_divisions",
-    polygon_subtype: str | None = None, limit: int = 50,
+    polygon_subtype: str | None = None,
+    limit: int = 50,
 ) -> dict[str, Any]:
     """Count the features of one dataset falling inside each polygon of another."""
     return engine.point_in_polygon(
-        min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat,
-        point_source=point_source, polygon_source=polygon_source,
-        polygon_subtype=polygon_subtype, limit=limit, **dependencies.engine_kwargs(),
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
+        point_source=point_source,
+        polygon_source=polygon_source,
+        polygon_subtype=polygon_subtype,
+        limit=limit,
+        **dependencies.engine_kwargs(),
     )
 
 
 def register(server) -> None:
     server.tool(name="geoparquet_filter_spatial", description=FILTER_SPATIAL)(filter_spatial)
     server.tool(name="geoparquet_find_nearest", description=FIND_NEAREST)(find_nearest)
-    server.tool(
-        name="geoparquet_aggregate_attribute", description=AGGREGATE_ATTRIBUTE
-    )(aggregate_attribute)
+    server.tool(name="geoparquet_aggregate_attribute", description=AGGREGATE_ATTRIBUTE)(
+        aggregate_attribute
+    )
     server.tool(name="geoparquet_summarize_h3", description=SUMMARIZE_H3)(summarize_h3)
-    server.tool(
-        name="geoparquet_count_in_polygons", description=COUNT_IN_POLYGONS
-    )(count_in_polygons)
+    server.tool(name="geoparquet_count_in_polygons", description=COUNT_IN_POLYGONS)(
+        count_in_polygons
+    )

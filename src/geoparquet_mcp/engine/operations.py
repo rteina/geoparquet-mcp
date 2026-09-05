@@ -372,12 +372,12 @@ def _attribute_filters(definition: Source, filters: _Filters) -> tuple[list[str]
         clauses.append(f"lower({definition.name_column}) LIKE lower(?)")
         params.append(f"%{filters.name_contains}%")
     if filters.min_confidence is not None:
-        if definition.name != "overture_places":
+        if not definition.confidence_column:
             raise InvalidRequestError(
                 f"source {definition.name!r} has no confidence column, so "
                 f"`min_confidence` cannot be used against it"
             )
-        clauses.append("confidence >= ?")
+        clauses.append(f"{definition.confidence_column} >= ?")
         params.append(filters.min_confidence)
     return clauses, params
 
@@ -532,9 +532,7 @@ def dataset_schema(
         geo = _geoparquet_metadata(measurement, target)
         bounds = _extent_from_statistics(measurement, target, definition.bbox_column)
 
-    extent = (
-        {key: bounds[key] for key in _BBOX_FIELDS} if bounds["min_lon"] is not None else None
-    )
+    extent = {key: bounds[key] for key in _BBOX_FIELDS} if bounds["min_lon"] is not None else None
 
     return {
         **_result_envelope(definition, scope),
@@ -572,6 +570,8 @@ def _column_role(definition: Source, name: str) -> str | None:
         return "name"
     if definition.category_column and definition.category_column.split(".")[0] == name:
         return "category"
+    if definition.confidence_column and definition.confidence_column.split(".")[0] == name:
+        return "confidence"
     return None
 
 
@@ -580,9 +580,7 @@ def _column_role(definition: Source, name: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _extent_from_statistics(
-    measurement: Measurement, target: str, column: str
-) -> dict[str, Any]:
+def _extent_from_statistics(measurement: Measurement, target: str, column: str) -> dict[str, Any]:
     """A dataset's bounding box, from the row-group statistics in its footers.
 
     Returns `min_lon` as None when the file carries no statistics on its bbox
@@ -1307,7 +1305,11 @@ def point_in_polygon(
         f") "
         f"SELECT polygon.polygon_name, polygon.polygon_subtype, count(*) AS feature_count "
         f"FROM point JOIN polygon ON ST_Contains(polygon.geometry, point.geometry) "
-        f"GROUP BY 1, 2 ORDER BY feature_count DESC "
+        # The name breaks ties, so two polygons holding the same number of
+        # features come back in the same order every time. Without it the row
+        # order is whatever the hash aggregate happened to produce, which makes
+        # an identical query look like a changed answer.
+        f"GROUP BY 1, 2 ORDER BY feature_count DESC, polygon_name "
         f"LIMIT {row_limit}"
     )
 
@@ -1441,8 +1443,7 @@ def attribute_aggregate(
                     f"count rows per group instead."
                 )
         expression = (
-            "count(*)" if request.measure is None
-            else f"{request.aggregate}({request.measure})"
+            "count(*)" if request.measure is None else f"{request.aggregate}({request.measure})"
         )
         sql = (
             f"SELECT {request.group_by} AS group_value, "
