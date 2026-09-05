@@ -1,7 +1,10 @@
 """MCP server: instantiation, tool and resource registration, transport, entry point.
 
-This module is intentionally thin. The behaviour lives in `tools/` and
-`resources/`; what happens here is the wiring the protocol needs.
+This module is intentionally thin, and it is the *only* module in the package
+allowed to import `mcp`. The capability lives in `engine/`, which knows
+nothing about the protocol; `tools/` and `resources/` are handlers that
+delegate to it. What happens here is the wiring the protocol needs, and
+nothing else.
 """
 
 from __future__ import annotations
@@ -19,12 +22,21 @@ Spatial analysis over remote GeoParquet files, read in place by DuckDB.
 Nothing is imported or downloaded first: each tool issues HTTP range requests
 against public object storage and reads only the row groups and columns its
 filters need. Start with `list_sources`, then `describe_source` to learn the
-column names, then `bbox_query`, `bbox_aggregate` or `nearest`.
+column names and `dataset_extent` to check the region is covered.
+
+Then pick the tool that matches the shape of the answer you need:
+  - `bbox_query` for the features themselves, as GeoJSON;
+  - `nearest` for what is closest to a point, with distances;
+  - `column_statistics` for "what kind of things are here", without moving them;
+  - `h3_aggregate` for where they are densest;
+  - `point_in_polygon` for how they distribute across administrative areas.
 
 Always pass the tightest bounding box the question allows. The rectangle is
-what makes the read cheap; a wide box reads a lot more of the file. Every
-result carries a `scan` block reporting the bytes that actually crossed the
-network, and `pushdown_report` measures that saving directly.
+what makes the read cheap: it is pushed into the Parquet file and prunes whole
+row groups before any byte is fetched, so a wide box costs far more than a
+narrow one. Prefer an aggregate over fetching features whenever the question
+allows it. Every result carries a `scan` block reporting the bytes that
+actually crossed the network — read it, and tighten the box if it looks large.
 """
 
 

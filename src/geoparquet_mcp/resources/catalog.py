@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from geoparquet_mcp import sources
+from geoparquet_mcp.engine import sources
 
 CATALOG_URI = "geoparquet://sources"
 SOURCE_URI_TEMPLATE = "geoparquet://sources/{source}"
