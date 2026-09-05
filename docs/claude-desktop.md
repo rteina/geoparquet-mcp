@@ -41,12 +41,12 @@ macOS (`%APPDATA%\Claude\claude_desktop_config.json` on Windows), and add:
 }
 ```
 
-Restart Claude Desktop. The seven tools appear under the connector.
+Restart Claude Desktop. The eight tools appear under the connector.
 
 **This exact configuration was tested** — not by hand in the desktop app, but
 by launching the command from this file as a subprocess and driving it with an
 MCP client over its pipes, which is the same thing Claude Desktop does. The
-server initialised, listed seven tools and the `geoparquet://sources`
+server initialised, listed eight tools and the `geoparquet://sources`
 resource, and answered a real query against the 73.6-million-row Overture
 `places` dataset. What has *not* been verified is the desktop UI itself:
 whether the connector renders the way you expect is between you and the app.
@@ -97,7 +97,7 @@ project is claiming.
 ### What the first query costs
 
 The first call in a fresh process reads Parquet footers over HTTP — about
-27 MB for `overture_places`, whose 16 parts carry 4096 row groups of
+26.5 MB for `overture_places`, whose 16 parts carry 4096 row groups of
 statistics — and takes a few seconds. Every later call reuses those cached
 footers and reads only data pages, or nothing at all. So a slow first
 question and instant follow-ups is the expected shape, not a fault.
