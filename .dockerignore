@@ -1,0 +1,54 @@
+# What never belongs in the build context.
+#
+# The first entry is the one that matters: .venv holds platform-specific
+# binaries built for the machine that ran `uv sync`. Copied into a linux/amd64
+# image from a macOS clone it is both large and unusable, and PATH points at
+# /app/.venv — so the wrong one would silently win over the one the image
+# builds. Everything else here is noise that only invalidates layer caches.
+
+# Local environments and their artefacts
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+build/
+dist/
+__pycache__/
+*.py[cod]
+*.so
+
+# Version control and CI
+.git/
+.github/
+.gitignore
+.dockerignore
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Not needed to run the server. README.md and LICENSE are deliberately absent
+# from this list: hatchling reads both while building the wheel.
+tests/
+docs/
+scripts/
+CLAUDE.md
+Dockerfile
+
+# Local data, editors, OS
+data/
+*.duckdb
+*.duckdb.wal
+*.parquet
+.env
+.env.*
+.idea/
+.vscode/
+.DS_Store
+*.swp

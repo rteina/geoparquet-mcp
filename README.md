@@ -139,6 +139,19 @@ uv run geoparquet-mcp-server --transport stdio                    # or: geoparqu
 uv run uvicorn geoparquet_mcp.app:create_app --factory --port 8000
 ```
 
+Putting the HTTP one somewhere an agent can reach it is a container and one `gcloud` command:
+
+```sh
+./scripts/deploy-gcp.sh deploy --dry-run   # read the command before running it
+./scripts/deploy-gcp.sh deploy             # Cloud Build, then Cloud Run
+```
+
+[`docs/deployment-gcp.md`](docs/deployment-gcp.md) is the rest of it: why the DuckDB extensions
+belong in the image rather than in a cold start, why scaling to zero costs ten seconds and keeping an
+instance warm costs hundreds of dollars, what the distance from Belgium to `us-west-2` does to a query
+that is mostly round trips — and the `421 Misdirected Request` that answers every MCP call until the
+service is told its own hostname, while `/health` keeps returning `200`.
+
 ## The measurement
 
 Section 5 above is the whole argument, and it has its own command:
