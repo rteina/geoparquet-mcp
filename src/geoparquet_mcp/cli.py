@@ -210,9 +210,15 @@ def main(argv: list[str] | None = None) -> int:
         print()
         return 0
     if args.command == "serve":
-        from geoparquet_mcp.server import build_server
+        # Delegated, not reimplemented. Serving over stdio is two steps —
+        # resolve the perimeter from the environment and install it, then run
+        # the server — and this command used to do only the second. It started,
+        # announced its eight tools, and failed every call that followed on a
+        # perimeter nobody had installed. `server.main` is the one place those
+        # two steps live.
+        from geoparquet_mcp.server import main as serve_over_transport
 
-        build_server().run(transport=args.transport)
+        serve_over_transport(["--transport", args.transport])
         return 0
     parser.error(f"unknown command {args.command!r}")
     return 2
