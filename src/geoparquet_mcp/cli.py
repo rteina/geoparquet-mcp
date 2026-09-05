@@ -14,7 +14,6 @@ import sys
 from typing import Any
 
 from geoparquet_mcp import __version__, benchmark, engine
-from geoparquet_mcp.tools import discovery, spatial
 
 # Paris, roughly the périphérique. Small enough that the pruning is dramatic,
 # dense enough that the answer is interesting.
@@ -56,6 +55,11 @@ def run_demo(source: str = engine.DEFAULT_SOURCE, as_json: bool = False) -> int:
     collected: dict[str, Any] = {}
     show = not as_json
 
+    # The perimeter, resolved once here and passed to every call below. The
+    # demo is the engine used directly, without a protocol: the same object
+    # the application injects into handlers, built by the caller instead.
+    scope = engine.DatasetScope.default()
+
     if show:
         print(
             "\033[1mgeoparquet-mcp demo\033[0m — spatial analysis on a remote file, no import step"
@@ -63,7 +67,7 @@ def run_demo(source: str = engine.DEFAULT_SOURCE, as_json: bool = False) -> int:
 
     if show:
         _rule("1. The dataset, described from its footers")
-    described = discovery.describe_source(source)
+    described = engine.dataset_schema(source=source, scope=scope)
     collected["describe_source"] = described
     if show:
         print(f"source        {described['title']}")
@@ -80,8 +84,8 @@ def run_demo(source: str = engine.DEFAULT_SOURCE, as_json: bool = False) -> int:
     if show:
         _rule(f"2. What is in {DEMO_PLACE}?")
     category_column = described["category_column"] or "class"
-    aggregate = spatial.column_statistics(
-        column=category_column, **DEMO_BBOX, source=source, top_k=8
+    aggregate = engine.column_statistics(
+        column=category_column, **DEMO_BBOX, source=source, top_k=8, scope=scope
     )
     collected["column_statistics"] = aggregate
     if show:
@@ -95,13 +99,14 @@ def run_demo(source: str = engine.DEFAULT_SOURCE, as_json: bool = False) -> int:
 
     if show:
         _rule("3. Bakeries within 400 m of Notre-Dame")
-    near = spatial.nearest(
+    near = engine.nearest(
         lon=2.3499,
         lat=48.8530,
         radius_km=0.4,
         source=source,
         category="bakery" if source == "overture_places" else None,
         limit=5,
+        scope=scope,
     )
     collected["nearest"] = near
     if show:
@@ -113,7 +118,7 @@ def run_demo(source: str = engine.DEFAULT_SOURCE, as_json: bool = False) -> int:
 
     if show:
         _rule("4. Where is it densest? H3 cells, computed remotely")
-    density = spatial.h3_aggregate(**DEMO_BBOX, resolution=8, source=source, limit=5)
+    density = engine.h3_aggregate(**DEMO_BBOX, resolution=8, source=source, limit=5, scope=scope)
     collected["h3_aggregate"] = density
     if show:
         for row in density["cells"]:
@@ -126,7 +131,7 @@ def run_demo(source: str = engine.DEFAULT_SOURCE, as_json: bool = False) -> int:
 
     if show:
         _rule("5. The point of all this: bytes moved")
-    proof = benchmark.pushdown_report(**DEMO_BBOX, source=source, mode="single_file")
+    proof = benchmark.pushdown_report(**DEMO_BBOX, source=source, scope=scope, mode="single_file")
     collected["pushdown_report"] = proof
     if show:
         without = proof["without_pushdown"]
@@ -201,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
             bench_argv.append("--json")
         return benchmark.main(bench_argv)
     if args.command == "sources":
-        json.dump(discovery.list_sources(), sys.stdout, indent=2, default=str)
+        json.dump(engine.list_datasets()["datasets"], sys.stdout, indent=2, default=str)
         print()
         return 0
     if args.command == "serve":
