@@ -96,6 +96,49 @@ The only thing that landed on disk is the project's own `.venv/`. There is no da
 step and no copy of the data: the 10.48 GB stayed in `us-west-2`, and the five sections above moved
 about 200 MB of it, nearly all in the last one.
 
+## Running the server
+
+The demo is a command, not a server: it answers five questions and exits. Connecting an agent to the
+same engine is a different script, with the same bootstrap — nothing to install first.
+
+```sh
+./scripts/serve.sh          # MCP over stdio, the transport a desktop client launches
+./scripts/serve.sh http     # MCP at POST /mcp plus the REST routes, on :8000
+./scripts/serve.sh config   # the claude_desktop_config.json block for this clone
+./scripts/serve.sh help
+```
+
+`stdio` sits silent, waiting for JSON-RPC on stdin; that is what a working server looks like, and
+Ctrl+C ends it. Bootstrap messages go to stderr precisely so stdout stays a clean protocol channel.
+
+For Claude Desktop you never run it yourself — the app launches the server as a subprocess. The
+awkward part is that the configuration has to name the executable by absolute path, because the app
+does not read your shell profile, so `./scripts/serve.sh config` prints the block with that path
+already filled in:
+
+```json
+{
+  "mcpServers": {
+    "geoparquet": {
+      "command": "/absolute/path/to/geoparquet-mcp/.venv/bin/geoparquet-mcp-server",
+      "args": ["--transport", "stdio"]
+    }
+  }
+}
+```
+
+Paste it into `claude_desktop_config.json`, restart, and the eight tools appear under the connector.
+[`docs/claude-desktop.md`](docs/claude-desktop.md) has the rest: the environment variables that narrow
+what the process may read, what the first query costs, and what to check when the connector does not
+appear.
+
+The script is a wrapper over the entry points, which are what you would run in a deployment:
+
+```sh
+uv run geoparquet-mcp-server --transport stdio                    # or: geoparquet-mcp serve
+uv run uvicorn geoparquet_mcp.app:create_app --factory --port 8000
+```
+
 ## The measurement
 
 Section 5 above is the whole argument, and it has its own command:
@@ -191,6 +234,8 @@ command on someone's laptop — Claude Desktop launches it as a subprocess over 
 orchestrator, no supervisor and no service mesh. A proxy means a second process the user has to start
 and keep in step. A sidecar means IPC and a supervisor for a workload that fits in one process. A
 sub-application means one process, and the wiring is one file: [`src/geoparquet_mcp/app.py`](src/geoparquet_mcp/app.py).
+[`docs/architecture-c4.md`](docs/architecture-c4.md) draws that decision, and the rest of the
+structure, as a C4 model — context, containers, components, code.
 
 That same file also has to attach the ASGI app twice — a `Route` at `/mcp` and a `Mount` for
 anything below it — because Starlette compiles a mount to a pattern requiring a segment after the
@@ -264,16 +309,16 @@ symlink planted inside it pointing out.
 ## Tests
 
 ```sh
-uv run pytest -m "not network"   # 227 tests, 2.2 s — what CI runs
+uv run pytest -m "not network"   # 229 tests, 3 s — what CI runs
 uv run pytest -m network         #  19 tests against the live Overture dataset
 ```
 
-246 tests, split by a `network` marker, because the two halves fail for different reasons.
+248 tests, split by a `network` marker, because the two halves fail for different reasons.
 
 The default half is hermetic. It generates a small GeoParquet corpus on disk laid out exactly like
 Overture's — same nested column names, same `bbox` struct, same directory shape — and runs the real
-engine against it, asserting exact results. It needs no network, finishes in 2.2 seconds, and is what
-runs on every push, on Python 3.12 and 3.13. `./scripts/make_fixtures.py` writes the corpus out if
+engine against it, asserting exact results. It needs no network, finishes in three seconds, and is
+what runs on every push, on Python 3.12 and 3.13. `./scripts/make_fixtures.py` writes the corpus out if
 you want to look at it.
 
 The `network` half reads Overture's public bucket. It is the only place the byte-level pushdown claim
@@ -284,8 +329,16 @@ The demo above is held in place by the same kind of test. It broke once — `cli
 tool-layer function that had been renamed, through a layer that needs a perimeter the CLI never
 installs — and nothing caught it, because nothing imported `cli` at all. `tests/test_cli.py` now
 reads the CLI's syntax tree and fails if it names something the engine does not have, if it reaches
-through the tool layer, or if the demo stops passing an explicit scope. It runs in 0.3 seconds and
+through the tool layer, or if the demo stops passing an explicit scope. It runs in 0.24 seconds and
 would have caught both halves of that failure before the command ever touched the network.
+
+A syntax tree has a blind spot, though, and `geoparquet-mcp serve` sat in it. The subcommand built
+the server and ran it without installing a perimeter first, so it started, announced its eight tools,
+and failed every call that followed. It named nothing that did not exist and imported nothing it
+should not have: the bug was a line that was not there. So the same file now launches both stdio
+entry points as subprocesses and reads a resource through each, over real pipes — the only way to
+find out that a server serves. That costs about a second, and it is the second the rest of the suite
+was missing.
 
 Among the hermetic tests is a snapshot of the complete JSON of the MCP surface — all eight tools, one
 resource and two resource templates, with every description and input schema. It fails on any
