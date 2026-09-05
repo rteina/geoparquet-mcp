@@ -197,7 +197,7 @@ def test_mcp_and_rest_share_one_process(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_client_sees_exactly_the_seven_tools(mcp: McpClient) -> None:
+def test_the_client_sees_exactly_the_published_tools(mcp: McpClient) -> None:
     names = {tool["name"] for tool in mcp.call("tools/list")["tools"]}
     assert names == {
         "geoparquet_describe_source",
@@ -206,6 +206,7 @@ def test_the_client_sees_exactly_the_seven_tools(mcp: McpClient) -> None:
         "geoparquet_aggregate_attribute",
         "geoparquet_summarize_h3",
         "geoparquet_find_nearest",
+        "geoparquet_count_in_polygons",
         "geoparquet_run_sql",
     }
 

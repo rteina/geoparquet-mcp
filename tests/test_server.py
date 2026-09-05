@@ -16,6 +16,7 @@ EXPECTED_TOOLS = {
     "geoparquet_aggregate_attribute",
     "geoparquet_summarize_h3",
     "geoparquet_find_nearest",
+    "geoparquet_count_in_polygons",
     "geoparquet_run_sql",
 }
 
@@ -26,13 +27,23 @@ async def test_every_tool_family_is_registered() -> None:
 
 
 async def test_the_surface_stays_small_enough_to_choose_from() -> None:
-    """Seven is the ceiling, and it is a design constraint rather than a coincidence.
+    """Eight is the ceiling, and the eighth was argued for rather than added.
 
     A tool list is a menu a model reads on every turn. Past a handful the
     choice gets worse, not better, and the marginal tool is usually a special
-    case of one already there.
+    case of one already there. That is why the ceiling exists.
+
+    `geoparquet_count_in_polygons` is the exception, and the reason it earns
+    the slot is that it is not a special case of anything here: it is the only
+    tool that reads two datasets at once, and the only way to group by a shape
+    rather than by a column. It is reachable through `geoparquet_run_sql`, but
+    only by a caller that writes a correct spatial join with bbox predicates
+    on both sides — which is exactly the pruning a typed tool guarantees and
+    an ad-hoc query does not.
+
+    Nine would need a better argument than that one.
     """
-    assert len(await build_server().list_tools()) <= 7
+    assert len(await build_server().list_tools()) <= 8
 
 
 async def test_the_measuring_bench_is_not_an_agent_capability() -> None:

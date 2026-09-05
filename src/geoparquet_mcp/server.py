@@ -59,6 +59,8 @@ Then pick the tool that matches the shape of the answer you need:
   - `geoparquet_aggregate_attribute` for "how many of each" and "what is the
     average", computed remotely;
   - `geoparquet_summarize_h3` for where things are densest;
+  - `geoparquet_count_in_polygons` for "how many in each district", which is
+    the one tool that reads two datasets at once;
   - `geoparquet_run_sql` last, for a join or a window function the others
     cannot express.
 

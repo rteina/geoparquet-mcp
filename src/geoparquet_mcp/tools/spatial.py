@@ -157,6 +157,44 @@ extension; if it cannot be loaded the tool says so rather than falling back to \
 something slower."""
 
 
+COUNT_IN_POLYGONS = """\
+Count how many features of one dataset fall inside each polygon of another: a \
+point-in-polygon join between two remote datasets, restricted to a rectangle.
+
+WHEN TO USE IT. For "how many of these are in each district", "which \
+neighbourhood has the most of them", "break this down by administrative \
+area" — any question whose answer is a table of areas with a number against \
+each. It is the only tool that reads two datasets at once, and the only way \
+to group by something that is not a column but a shape.
+
+Use `geoparquet_aggregate_attribute` instead when you can group by a column \
+the dataset already carries; it is much cheaper. Use this one when the \
+grouping is geographic and the boundaries live in a different file.
+
+COST. This is the most expensive tool here, and knowingly so: the rectangle \
+prunes both datasets before the join, but the containment test still has to \
+decode real geometry on both sides. Expect tens of megabytes and tens of \
+seconds on a city-sized box, against single-digit megabytes for the other \
+tools. Keep the rectangle tight, and prefer a narrower `polygon_subtype`.
+
+PARAMETERS.
+  min_lon, min_lat, max_lon, max_lat: the rectangle, in WGS 84 degrees. All \
+four are required — this tool has no whole-world mode.
+  point_source: the dataset being counted.
+  polygon_source: the dataset providing the containing areas. It must be a \
+polygonal dataset; a point dataset is refused before anything is read.
+  polygon_subtype: narrows the polygon side to one administrative level, for \
+example 'locality' or 'county'. Without it a country-sized polygon is \
+returned alongside a neighbourhood one, because both overlap the rectangle, \
+and the counts are then not comparable to each other.
+  limit: maximum polygons returned, ordered by count descending.
+
+WHAT COMES BACK. `polygons`, each with `polygon_name`, `polygon_subtype` and \
+`feature_count`; the `sql` that ran; and the `scan` block. The count is the \
+number of features whose geometry is contained by that polygon, not merely \
+overlapping its bounding box."""
+
+
 def filter_spatial(
     source: str = engine.DEFAULT_SOURCE,
     min_lon: float | None = None, min_lat: float | None = None,
@@ -219,6 +257,20 @@ def summarize_h3(
     )
 
 
+def count_in_polygons(
+    min_lon: float, min_lat: float, max_lon: float, max_lat: float,
+    point_source: str = engine.DEFAULT_SOURCE,
+    polygon_source: str = "overture_divisions",
+    polygon_subtype: str | None = None, limit: int = 50,
+) -> dict[str, Any]:
+    """Count the features of one dataset falling inside each polygon of another."""
+    return engine.point_in_polygon(
+        min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat,
+        point_source=point_source, polygon_source=polygon_source,
+        polygon_subtype=polygon_subtype, limit=limit, **dependencies.engine_kwargs(),
+    )
+
+
 def register(server) -> None:
     server.tool(name="geoparquet_filter_spatial", description=FILTER_SPATIAL)(filter_spatial)
     server.tool(name="geoparquet_find_nearest", description=FIND_NEAREST)(find_nearest)
@@ -226,3 +278,6 @@ def register(server) -> None:
         name="geoparquet_aggregate_attribute", description=AGGREGATE_ATTRIBUTE
     )(aggregate_attribute)
     server.tool(name="geoparquet_summarize_h3", description=SUMMARIZE_H3)(summarize_h3)
+    server.tool(
+        name="geoparquet_count_in_polygons", description=COUNT_IN_POLYGONS
+    )(count_in_polygons)

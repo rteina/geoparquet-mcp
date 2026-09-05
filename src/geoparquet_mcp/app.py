@@ -269,6 +269,26 @@ def _register_routes(app: FastAPI, config: AppConfig) -> None:
             resolution=resolution, source=source, limit=limit, **deps.kwargs,
         )
 
+    @app.get("/query/in-polygons", tags=["spatial"])
+    def in_polygons(
+        min_lon: float,
+        min_lat: float,
+        max_lon: float,
+        max_lat: float,
+        point_source: str = engine.DEFAULT_SOURCE,
+        polygon_source: str = "overture_divisions",
+        polygon_subtype: str | None = None,
+        limit: int = Query(default=50, ge=1),
+        deps: EngineDependencies = Deps,
+    ) -> dict[str, Any]:
+        """Point-in-polygon counts. Mirrors `geoparquet_count_in_polygons`."""
+        return engine.point_in_polygon(
+            min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat,
+            point_source=point_source, polygon_source=polygon_source,
+            polygon_subtype=polygon_subtype, limit=limit, **deps.kwargs,
+        )
+
+
     if not config.mcp_enabled:
         logger.info("MCP is disabled; no sub-application was mounted")
 
