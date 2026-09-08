@@ -33,16 +33,34 @@ def _gb(value: int | float | None) -> str:
     return f"{value / 1_000_000_000:,.2f} GB"
 
 
-def _read_line(scan: dict[str, Any]) -> str:
+def _read_line(scan: dict[str, Any], note: str | None = None) -> str:
     """How much this step pulled over the network, and why it might be nothing.
 
     Later steps often read zero bytes: the session is a singleton, so DuckDB
     still has the footers and pages the earlier steps fetched. Printing a bare
     "0.0 MB" reads like a broken counter, so say what it means.
+
+    `note` qualifies the number for a reader who sees only this line. Steps 2
+    to 4 run on the process session that step 1 warmed; step 5 runs on cold
+    sessions. Without the qualifier the two figures look contradictory.
     """
+    suffix = f"  ({note})" if note else ""
     if scan["bytes_scanned"] == 0:
         return f"read: nothing — already in the session cache ({scan['elapsed_ms']:,.0f} ms)"
-    return f"read: {_mb(scan['bytes_scanned'])} in {scan['elapsed_ms']:,.0f} ms"
+    return f"read: {_mb(scan['bytes_scanned'])} in {scan['elapsed_ms']:,.0f} ms{suffix}"
+
+
+# What step 5 actually compares, printed above its numbers. The output of this
+# demo is read as a screenshot, without the repository around it, so the
+# mechanism has to be on screen: both sides run the same bbox-struct filter,
+# and the only difference is DuckDB's filter-pushdown optimiser.
+PUSHDOWN_PREAMBLE = (
+    "Same bounding box as step 2, a different read: one part file,\n"
+    "one aggregate, each run on its own cold session. The filter is\n"
+    "identical on both sides — four comparisons on the bbox struct,\n"
+    "not a geometry function. Only DuckDB's filter-pushdown\n"
+    "optimiser changes: disabled, it fetches every row group."
+)
 
 
 def _rule(title: str) -> None:
@@ -95,7 +113,7 @@ def run_demo(source: str = engine.DEFAULT_SOURCE, as_json: bool = False) -> int:
             f"{aggregate['row_count']:,} features, {aggregate['distinct_values']:,} distinct "
             f"{category_column} values"
         )
-        print(_read_line(aggregate["scan"]))
+        print(_read_line(aggregate["scan"], note="warm session, footers already read"))
 
     if show:
         _rule("3. Bakeries within 400 m of Notre-Dame")
@@ -135,19 +153,25 @@ def run_demo(source: str = engine.DEFAULT_SOURCE, as_json: bool = False) -> int:
     collected["pushdown_report"] = proof
     if show:
         without = proof["without_pushdown"]
+        pushed = proof["with_pushdown"]
+        print(PUSHDOWN_PREAMBLE)
+        print()
         print(f"matching features            {proof['matches']:,}")
         print(
             f"whole dataset, if downloaded {_gb(proof['dataset_remote_bytes'])} "
             f"({proof['remote_files']} files)"
         )
         print(f"one part file, if downloaded {_mb(proof['baseline_bytes_if_downloaded'])}")
+        # Exact bytes, not megabytes: these counts are reproducible to the byte
+        # for a given release, and the rounding is what made step 2 and step 5
+        # look like the same measurement.
         print(
-            f"same query, pushdown OFF     {_mb(without['bytes_scanned'])} "
+            f"cold read, pushdown off      {without['bytes_scanned']:>11,} bytes "
             f"in {without['elapsed_ms']:,.0f} ms"
         )
         print(
-            f"same query, pushdown ON      {_mb(proof['with_pushdown']['bytes_scanned'])} "
-            f"in {proof['with_pushdown']['elapsed_ms']:,.0f} ms"
+            f"cold read, pushdown on       {pushed['bytes_scanned']:>11,} bytes "
+            f"in {pushed['elapsed_ms']:,.0f} ms"
         )
         print()
         print(
@@ -158,7 +182,7 @@ def run_demo(source: str = engine.DEFAULT_SOURCE, as_json: bool = False) -> int:
             f"  \033[1m{proof['download_avoided_ratio']}× fewer bytes"
             " than downloading that one file\033[0m"
         )
-        total_ratio = proof["dataset_remote_bytes"] / proof["with_pushdown"]["bytes_scanned"]
+        total_ratio = proof["dataset_remote_bytes"] / pushed["bytes_scanned"]
         print(f"  \033[1m{total_ratio:,.0f}× fewer bytes than downloading the dataset\033[0m")
         print()
         print(f"attribution: {described['attribution']} — {described['license']}")
