@@ -21,6 +21,7 @@ from geoparquet_mcp.engine.errors import (
     CapabilityUnavailableError,
     EngineError,
     InvalidRequestError,
+    QueryTimeoutError,
     RemoteReadError,
     ScopeViolationError,
     UnknownColumnError,
@@ -98,4 +99,5 @@ __all__ = [
     "ScopeViolationError",
     "CapabilityUnavailableError",
     "RemoteReadError",
+    "QueryTimeoutError",
 ]

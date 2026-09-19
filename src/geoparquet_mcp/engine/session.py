@@ -23,7 +23,11 @@ from typing import Any
 
 import duckdb
 
-from geoparquet_mcp.engine.errors import CapabilityUnavailableError, RemoteReadError
+from geoparquet_mcp.engine.errors import (
+    CapabilityUnavailableError,
+    QueryTimeoutError,
+    RemoteReadError,
+)
 
 # DuckDB extensions required to read remote GeoParquet. `httpfs` provides the
 # HTTP/S3 file systems; `spatial` provides the ST_* functions.
@@ -47,6 +51,11 @@ DEFAULT_HTTP_RETRIES = 3
 
 # Hard cap on rows returned to the client, whatever an operation asks for.
 MAX_ROW_LIMIT = 1000
+
+# Wall-clock ceiling on one ad-hoc query. `http_timeout` bounds a single
+# request, not a scan made of thousands of them: a query that defeats row-group
+# pruning runs for many minutes, long after the client has given up on it.
+DEFAULT_QUERY_TIMEOUT_SECONDS = 60
 
 # DuckDB prefixes its statement echo with this, on its own line.
 _SQL_ECHO = re.compile(r"^LINE \d+:", re.MULTILINE)
@@ -123,27 +132,65 @@ class Measurement:
     and the report on exit describes exactly those queries.
     """
 
-    def __init__(self, cursor: duckdb.DuckDBPyConnection, report: ScanReport) -> None:
+    def __init__(
+        self,
+        cursor: duckdb.DuckDBPyConnection,
+        report: ScanReport,
+        max_seconds: float | None = None,
+    ) -> None:
         self._cursor = cursor
         self.report = report
+        self.max_seconds = max_seconds
+        self._deadline = None if max_seconds is None else time.monotonic() + max_seconds
+
+    @contextmanager
+    def _guarded(self, sql: str) -> Iterator[None]:
+        """Translate DuckDB failures, and interrupt the cursor at the deadline.
+
+        The deadline belongs to the whole window, not to each statement, so a
+        window of several statements cannot outlast it one statement at a time.
+        """
+        timer = None
+        if self._deadline is not None:
+            timer = threading.Timer(
+                max(self._deadline - time.monotonic(), 0.0), self._cursor.interrupt
+            )
+            timer.daemon = True
+            timer.start()
+        try:
+            yield
+        except duckdb.InterruptException as exc:
+            # `finished` is set once the timer has fired; it is only cancelled
+            # below, so here it can mean nothing else.
+            if timer is not None and timer.finished.is_set():
+                raise QueryTimeoutError(
+                    f"the query was stopped after {self.max_seconds:g} s"
+                ) from exc
+            raise RemoteReadError(_explain_duckdb_error(exc), sql=sql) from exc
+        except duckdb.Error as exc:
+            raise RemoteReadError(_explain_duckdb_error(exc), sql=sql) from exc
+        finally:
+            if timer is not None:
+                timer.cancel()
 
     def execute(self, sql: str, parameters: list[Any] | None = None) -> duckdb.DuckDBPyConnection:
         """Run a statement on the measured cursor, translating DuckDB failures."""
-        try:
+        with self._guarded(sql):
             return self._cursor.execute(sql, parameters or [])
-        except duckdb.Error as exc:
-            raise RemoteReadError(_explain_duckdb_error(exc), sql=sql) from exc
 
     def records(self, sql: str, parameters: list[Any] | None = None) -> list[dict[str, Any]]:
         """Run a query and return plain JSON-friendly dicts.
 
         Results are serialised to JSON by the callers, so the cursor is
         drained into Python primitives here rather than handing back a
-        DuckDB relation.
+        DuckDB relation. The drain runs under the same deadline as the
+        statement, since that is where a streamed scan does its work.
         """
-        cursor = self.execute(sql, parameters)
-        columns = [description[0] for description in cursor.description or []]
-        return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+        with self._guarded(sql):
+            cursor = self._cursor.execute(sql, parameters or [])
+            columns = [description[0] for description in cursor.description or []]
+            rows = cursor.fetchall()
+        return [dict(zip(columns, row, strict=True)) for row in rows]
 
     def one(self, sql: str, parameters: list[Any] | None = None) -> dict[str, Any]:
         """Run a query expected to return exactly one row."""
@@ -252,13 +299,17 @@ class Session:
         self._optional[name] = True
 
     @contextmanager
-    def measure(self) -> Iterator[Measurement]:
+    def measure(self, max_seconds: float | None = None) -> Iterator[Measurement]:
         """Account for every byte a block of queries pulls over HTTP.
 
         Yields a `Measurement` whose queries run on a private cursor. On exit
         its `report` holds the bytes, request count, distinct remote files and
         wall-clock duration for that block alone — correct even when other
         measurements run concurrently.
+
+        With `max_seconds`, a query still running when the window has lasted
+        that long is interrupted and raises `QueryTimeoutError`; the report is
+        filled in regardless, so the caller can say what the attempt cost.
         """
         cursor = self._connection.cursor()
         self._apply_settings(cursor)
@@ -274,7 +325,7 @@ class Session:
         report = ScanReport()
         started = time.perf_counter()
         try:
-            yield Measurement(cursor, report)
+            yield Measurement(cursor, report, max_seconds)
         finally:
             report.elapsed_ms = (time.perf_counter() - started) * 1000
             totals = self._connection.execute(
