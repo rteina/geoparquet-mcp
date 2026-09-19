@@ -25,6 +25,7 @@ from geoparquet_mcp.engine.errors import (
     UnknownColumnError,
     UnknownSourceError,
 )
+from geoparquet_mcp.engine.session import Session, SessionConfig
 
 PLACES = corpus.PLACES
 DIVISIONS = corpus.DIVISIONS
@@ -637,6 +638,46 @@ def test_the_byte_budget_is_reported_as_a_verdict_not_a_brake(engine_kwargs) -> 
 def test_sql_the_perimeter_refuses(engine_kwargs, sql, expected) -> None:
     with pytest.raises(InvalidRequestError, match=expected):
         engine.run_sql(sql, **engine_kwargs)
+
+
+_H3_SQL = f"SELECT h3_latlng_to_cell_string(bbox.ymin, bbox.xmin, 4) AS cell FROM {PLACES} LIMIT 1"
+
+
+def test_an_h3_function_in_sql_loads_the_extension_on_a_fresh_session(
+    engine_kwargs,
+) -> None:
+    # A fresh session, because the shared one may have loaded h3 already
+    # through `h3_aggregate` — which is exactly what hid this.
+    fresh = Session(SessionConfig(extensions=("spatial",)))
+    try:
+        result = engine.run_sql(_H3_SQL, scope=engine_kwargs["scope"], session=fresh)
+    except CapabilityUnavailableError as exc:
+        pytest.skip(f"h3 extension unavailable: {exc}")
+    finally:
+        fresh.close()
+    assert len(result["rows"][0]["cell"]) == 15
+
+
+def test_an_h3_function_without_the_extension_says_so_rather_than_not_found(
+    engine_kwargs, monkeypatch
+) -> None:
+    fresh = Session(SessionConfig(extensions=("spatial",)))
+    requested: list[str] = []
+
+    def unavailable(name: str) -> None:
+        requested.append(name)
+        raise CapabilityUnavailableError(f"the DuckDB '{name}' extension is not available")
+
+    monkeypatch.setattr(fresh, "require_extension", unavailable)
+    try:
+        with pytest.raises(CapabilityUnavailableError, match="'h3'"):
+            engine.run_sql(_H3_SQL, scope=engine_kwargs["scope"], session=fresh)
+        engine.run_sql(
+            f"SELECT count(*) AS n FROM {PLACES}", scope=engine_kwargs["scope"], session=fresh
+        )
+    finally:
+        fresh.close()
+    assert requested == ["h3"], "only a query that calls h3 should ask for it"
 
 
 # A self-join that keeps DuckDB busy for far longer than the ceilings below,
