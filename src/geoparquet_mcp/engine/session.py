@@ -57,6 +57,9 @@ MAX_ROW_LIMIT = 1000
 # pruning runs for many minutes, long after the client has given up on it.
 DEFAULT_QUERY_TIMEOUT_SECONDS = 60
 
+# How often a timed-out statement is re-interrupted until it stops.
+_INTERRUPT_RETRY_SECONDS = 0.05
+
 # DuckDB prefixes its statement echo with this, on its own line.
 _SQL_ECHO = re.compile(r"^LINE \d+:", re.MULTILINE)
 
@@ -150,19 +153,24 @@ class Measurement:
         The deadline belongs to the whole window, not to each statement, so a
         window of several statements cannot outlast it one statement at a time.
         """
-        timer = None
+        fired = threading.Event()
+        done = threading.Event()
         if self._deadline is not None:
-            timer = threading.Timer(
-                max(self._deadline - time.monotonic(), 0.0), self._cursor.interrupt
-            )
-            timer.daemon = True
-            timer.start()
+            remaining = self._deadline - time.monotonic()
+            # DuckDB drops an interrupt aimed at an idle cursor, so a window
+            # already spent by parsing or view creation must be refused here:
+            # the interrupt would land before the statement and be forgotten.
+            if remaining <= 0:
+                raise QueryTimeoutError(f"the query was stopped after {self.max_seconds:g} s")
+            threading.Thread(
+                target=self._watchdog, args=(remaining, fired, done), daemon=True
+            ).start()
         try:
             yield
         except duckdb.InterruptException as exc:
-            # `finished` is set once the timer has fired; it is only cancelled
-            # below, so here it can mean nothing else.
-            if timer is not None and timer.finished.is_set():
+            # `fired` is set before the first interrupt, so it cannot lag
+            # behind the exception that interrupt raises.
+            if fired.is_set():
                 raise QueryTimeoutError(
                     f"the query was stopped after {self.max_seconds:g} s"
                 ) from exc
@@ -170,8 +178,20 @@ class Measurement:
         except duckdb.Error as exc:
             raise RemoteReadError(_explain_duckdb_error(exc), sql=sql) from exc
         finally:
-            if timer is not None:
-                timer.cancel()
+            done.set()
+
+    def _watchdog(self, remaining: float, fired: threading.Event, done: threading.Event) -> None:
+        """Interrupt the cursor at the deadline, and keep at it until the statement is gone.
+
+        One interrupt is not enough: fired a moment before the statement
+        starts, it hits an idle cursor and DuckDB forgets it.
+        """
+        if done.wait(remaining):
+            return
+        fired.set()
+        while not done.is_set():
+            self._cursor.interrupt()
+            done.wait(_INTERRUPT_RETRY_SECONDS)
 
     def execute(self, sql: str, parameters: list[Any] | None = None) -> duckdb.DuckDBPyConnection:
         """Run a statement on the measured cursor, translating DuckDB failures."""

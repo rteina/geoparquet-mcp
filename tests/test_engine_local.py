@@ -14,6 +14,8 @@ property of reading over a network and stays in `test_remote_scan.py`.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 import corpus
@@ -673,6 +675,8 @@ def test_sql_the_perimeter_refuses(engine_kwargs, sql, expected) -> None:
 _H3_SQL = f"SELECT h3_latlng_to_cell_string(bbox.ymin, bbox.xmin, 4) AS cell FROM {PLACES} LIMIT 1"
 
 
+# A fresh session installs h3 from the community repository: a download.
+@pytest.mark.network
 def test_an_h3_function_in_sql_loads_the_extension_on_a_fresh_session(
     engine_kwargs,
 ) -> None:
@@ -727,6 +731,28 @@ def test_a_query_past_the_time_ceiling_is_stopped_and_says_how_to_rewrite_it(
     # The interrupted cursor is gone; the session behind it still answers.
     result = engine.run_sql(f"SELECT count(*) AS n FROM {PLACES}", **engine_kwargs)
     assert result["rows"] == [{"n": corpus.GRID_COUNT + 6}]
+
+
+def test_a_window_spent_before_the_query_starts_refuses_it_rather_than_running_it_unbounded(
+    engine_kwargs,
+) -> None:
+    # A spent window is what slow view creation or an extension install
+    # leaves behind; the interrupt it would schedule lands on an idle cursor.
+    with pytest.raises(QueryTimeoutError, match="stopped after 0 s"):
+        engine.run_sql(_ENDLESS, max_seconds=0, **engine_kwargs)
+
+
+def test_an_interrupt_that_fires_just_before_the_statement_is_not_lost(local_session) -> None:
+    # The deadline passes between the check and the statement: the first
+    # interrupt hits an idle cursor and DuckDB forgets it.
+    endless = "SELECT count(*) FROM range(100000) a, range(100000) b WHERE a.range + b.range > -1"
+    with (
+        local_session.measure(max_seconds=0.05) as measurement,
+        pytest.raises(QueryTimeoutError),
+        measurement._guarded(endless),
+    ):
+        time.sleep(0.2)
+        measurement._cursor.execute(endless).fetchall()
 
 
 def test_a_query_inside_the_time_ceiling_is_not_touched_by_it(engine_kwargs) -> None:
