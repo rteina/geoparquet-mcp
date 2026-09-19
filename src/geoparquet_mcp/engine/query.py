@@ -143,6 +143,19 @@ def _assert_reads_only_the_scope(tree: dict[str, Any], allowed: list[str]) -> li
     return sorted(referenced)
 
 
+def _calls_h3(tree: dict[str, Any]) -> bool:
+    """Whether the statement calls any function of the optional `h3` extension.
+
+    That extension is loaded on first use, not with the session, so a query
+    naming `h3_latlng_to_cell` would otherwise work or fail depending on
+    whether an earlier call happened to load it.
+    """
+    return any(
+        node.get("type") == "FUNCTION" and str(node.get("function_name", "")).startswith("h3_")
+        for node in _walk(tree)
+    )
+
+
 def _register_views(measurement: Measurement, scope: DatasetScope, names: list[str]) -> None:
     """Bind each in-scope dataset to a view name on the measured cursor.
 
@@ -202,6 +215,8 @@ def run_sql(
         with active.measure(max_seconds=max_seconds) as measurement:
             tree = _syntax_tree(measurement, text)
             referenced = _assert_reads_only_the_scope(tree, allowed)
+            if _calls_h3(tree):
+                active.require_extension("h3")
             _register_views(measurement, scope, referenced)
             rows = measurement.records(wrapped)
     except QueryTimeoutError as exc:
