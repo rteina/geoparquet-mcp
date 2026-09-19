@@ -215,6 +215,36 @@ def test_a_named_projection_replaces_the_default_one(engine_kwargs) -> None:
     assert set(result["geojson"]["features"][0]["properties"]) == {"id", "confidence"}
 
 
+def test_a_list_element_can_be_projected_by_its_index(engine_kwargs) -> None:
+    result = engine.spatial_filter(
+        **CORNER,
+        source=PLACES,
+        columns=["id", "addresses[1].freeform"],
+        include_geometry=False,
+        **engine_kwargs,
+    )
+    properties = result["geojson"]["features"][0]["properties"]
+    assert set(properties) == {"id", "(addresses[1]).freeform"}
+    assert properties["(addresses[1]).freeform"]
+
+
+@pytest.mark.parametrize(
+    "column",
+    [
+        "addresses[1]; DROP TABLE x",
+        "addresses[0].freeform",
+        "addresses[-1].freeform",
+        "addresses[0x1].freeform",
+        "addresses[1:2]",
+        "addresses[i].freeform",
+        "[1].freeform",
+    ],
+)
+def test_a_subscript_is_digits_and_nothing_else(engine_kwargs, column) -> None:
+    with pytest.raises(InvalidRequestError, match="not a valid column reference"):
+        engine.preview_rows(source=PLACES, columns=[column], **engine_kwargs)
+
+
 def test_the_row_limit_is_clamped_and_the_answer_says_it_was_truncated(
     engine_kwargs,
 ) -> None:

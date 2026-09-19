@@ -47,9 +47,14 @@ MIN_H3_RESOLUTION = 0
 MAX_H3_RESOLUTION = 15
 
 # Caller-supplied column references are interpolated into SQL, so they are
-# restricted to dotted identifiers. Registry-supplied projections are trusted
-# and bypass this; anything arriving from outside does not.
-_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+# restricted to dotted identifiers, each optionally followed by a 1-based list
+# subscript — Overture keeps addresses as a list of structs, and without one
+# `addresses[1].freeform` could not be asked for. The subscript is digits
+# only, so it adds nothing a caller could inject. Registry-supplied
+# projections are trusted and bypass this; anything arriving from outside
+# does not.
+_SEGMENT = r"[A-Za-z_][A-Za-z0-9_]*(\[[1-9][0-9]*\])?"
+_IDENTIFIER = re.compile(rf"^{_SEGMENT}(\.{_SEGMENT})*$")
 
 # `parquet_metadata()` renders a nested column's path with ", " between the
 # levels, so the bbox members are addressed as 'bbox, xmin' and not 'bbox.xmin'.
@@ -74,7 +79,8 @@ def _safe_column(value: str) -> str:
     if not _IDENTIFIER.match(value):
         raise ValueError(
             f"{value!r} is not a valid column reference; expected a name such as "
-            f"'confidence' or a nested path such as 'categories.primary'"
+            f"'confidence', a nested path such as 'categories.primary', or a list "
+            f"element by 1-based index such as 'addresses[1].freeform'"
         )
     return value
 

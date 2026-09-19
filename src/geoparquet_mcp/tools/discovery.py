@@ -67,7 +67,8 @@ important places" or "places near anywhere". To ask where things are, use \
 PARAMETERS.
   source: dataset name.
   columns: column expressions to return, for example ["id", "names.primary", \
-"confidence"]. Omit for the dataset's default projection.
+"confidence", "addresses[1].freeform"]. A list element takes a 1-based index. \
+Omit for the dataset's default projection.
   limit: how many rows, 1 to 100. Ten is usually enough to see the shape.
 
 WHAT COMES BACK. `rows` as plain records, `columns_returned` naming the keys, \

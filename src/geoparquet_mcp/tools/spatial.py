@@ -55,7 +55,9 @@ the answer is exact. Give either a rectangle or a `wkt`, never both.
   min_confidence: 0 to 1, Overture's own confidence in the record. 0.8 drops \
 most questionable entries.
   columns: column expressions to return. A narrow projection is worth as much \
-as a tight box, because Parquet is columnar and unread columns are unfetched.
+as a tight box, because Parquet is columnar and unread columns are unfetched. \
+Nested fields take a dot ('names.primary'); a list element takes a 1-based \
+index ('addresses[1].freeform').
   include_geometry: false skips the geometry column — the widest in the file — \
 and approximates each feature by its bounding-box corner, which is exact for \
 points. Ignored when `wkt` is used, since the exact test needs the geometry.
