@@ -21,6 +21,7 @@ from geoparquet_mcp import engine
 from geoparquet_mcp.engine.errors import (
     CapabilityUnavailableError,
     InvalidRequestError,
+    QueryTimeoutError,
     UnknownColumnError,
     UnknownSourceError,
 )
@@ -636,3 +637,27 @@ def test_the_byte_budget_is_reported_as_a_verdict_not_a_brake(engine_kwargs) -> 
 def test_sql_the_perimeter_refuses(engine_kwargs, sql, expected) -> None:
     with pytest.raises(InvalidRequestError, match=expected):
         engine.run_sql(sql, **engine_kwargs)
+
+
+# A self-join that keeps DuckDB busy for far longer than the ceilings below,
+# built from the corpus alone: a table function would be refused before it ran.
+_ENDLESS = (
+    f"SELECT count(*) AS n FROM {PLACES} a, {PLACES} b, {PLACES} c, {PLACES} d, {PLACES} e "
+    f"WHERE a.confidence + b.confidence + c.confidence + d.confidence + e.confidence > -1"
+)
+
+
+def test_a_query_past_the_time_ceiling_is_stopped_and_says_how_to_rewrite_it(
+    engine_kwargs,
+) -> None:
+    with pytest.raises(QueryTimeoutError, match="stopped after 0.3 s") as caught:
+        engine.run_sql(_ENDLESS, max_seconds=0.3, **engine_kwargs)
+    assert "UNION ALL" in str(caught.value)
+    # The interrupted cursor is gone; the session behind it still answers.
+    result = engine.run_sql(f"SELECT count(*) AS n FROM {PLACES}", **engine_kwargs)
+    assert result["rows"] == [{"n": corpus.GRID_COUNT + 6}]
+
+
+def test_a_query_inside_the_time_ceiling_is_not_touched_by_it(engine_kwargs) -> None:
+    result = engine.run_sql(f"SELECT count(*) AS n FROM {PLACES}", max_seconds=30, **engine_kwargs)
+    assert result["rows"] == [{"n": corpus.GRID_COUNT + 6}]

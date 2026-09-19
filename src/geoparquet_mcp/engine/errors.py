@@ -58,6 +58,16 @@ class CapabilityUnavailableError(EngineError):
     """
 
 
+class QueryTimeoutError(EngineError):
+    """A query ran past its wall-clock ceiling and was interrupted.
+
+    Distinct from `RemoteReadError`: nothing failed, the query was simply too
+    expensive, and the fix is to rewrite it rather than to retry it. Without
+    the ceiling the client gives up first and reports a bare failure, while
+    the scan it abandoned keeps running on the server.
+    """
+
+
 class RemoteReadError(EngineError):
     """DuckDB failed while reading the remote dataset.
 

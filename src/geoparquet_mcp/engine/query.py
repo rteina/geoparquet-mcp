@@ -36,8 +36,9 @@ from typing import Any
 import duckdb
 
 from geoparquet_mcp.engine import sources
-from geoparquet_mcp.engine.errors import InvalidRequestError
+from geoparquet_mcp.engine.errors import InvalidRequestError, QueryTimeoutError
 from geoparquet_mcp.engine.session import (
+    DEFAULT_QUERY_TIMEOUT_SECONDS,
     MAX_ROW_LIMIT,
     Measurement,
     Session,
@@ -159,6 +160,7 @@ def run_sql(
     sql: str,
     max_rows: int = 100,
     max_bytes: int = DEFAULT_MAX_BYTES,
+    max_seconds: float = DEFAULT_QUERY_TIMEOUT_SECONDS,
     scope: DatasetScope | None = None,
     session: Session | None = None,
 ) -> dict[str, Any]:
@@ -176,6 +178,11 @@ def run_sql(
     (they have already been paid for) together with the verdict, which is the
     signal to narrow the next query. The row ceiling, by contrast, is real.
 
+    So is the time ceiling. A query still running after `max_seconds` is
+    interrupted and raises `QueryTimeoutError`, with what it had read by then
+    and how to rewrite it. Without that, a scan that defeats row-group pruning
+    runs on for many minutes after the client has stopped waiting for it.
+
     Prefer a typed operation when one fits: they push their filters down by
     construction, whereas an ad-hoc query pushes down only what its `WHERE`
     clause happens to express over the `bbox` struct.
@@ -190,12 +197,24 @@ def run_sql(
     allowed = view_names(scope)
     row_limit = clamp_limit(max_rows)
 
-    with active.measure() as measurement:
-        tree = _syntax_tree(measurement, text)
-        referenced = _assert_reads_only_the_scope(tree, allowed)
-        _register_views(measurement, scope, referenced)
-        wrapped = f"SELECT * FROM ({text}) LIMIT {row_limit}"
-        rows = measurement.records(wrapped)
+    wrapped = f"SELECT * FROM ({text}) LIMIT {row_limit}"
+    try:
+        with active.measure(max_seconds=max_seconds) as measurement:
+            tree = _syntax_tree(measurement, text)
+            referenced = _assert_reads_only_the_scope(tree, allowed)
+            _register_views(measurement, scope, referenced)
+            rows = measurement.records(wrapped)
+    except QueryTimeoutError as exc:
+        raise QueryTimeoutError(
+            f"{exc}, having read {measurement.report.megabytes_scanned} MB in "
+            f"{measurement.report.http_requests} requests without finishing. A query this "
+            f"slow is almost always reading every row group: the Parquet reader can skip "
+            f"one only on four plain comparisons of bbox.xmin/xmax/ymin/ymax joined by AND. "
+            f"Rectangles joined by OR, or a location test that lives only in a JOIN "
+            f"condition, prune nothing. Rewrite it as one SELECT per rectangle joined with "
+            f"UNION ALL, or add a single enclosing rectangle as four ANDed comparisons, or "
+            f"use a typed tool."
+        ) from exc
 
     report = measurement.report.as_dict()
     return {
@@ -220,7 +239,7 @@ def run_sql(
 # reasons: it has to contain SQL, and the tool layer is required to contain
 # none — in its prose as much as in its code. `tools/sql.py` imports it as the
 # MCP tool description.
-USAGE = """\
+USAGE = f"""\
 Run one read-only SELECT against the datasets in scope, for questions the \
 other tools do not have a shape for.
 
@@ -251,10 +270,26 @@ would read the entire file, because the Parquet reader cannot see through it. \
 Select named columns rather than *, for the same reason: unread columns are \
 unfetched.
 
+SEVERAL PLACES AT ONCE. Only a plain AND of those four comparisons prunes. \
+Rectangles joined with OR, or a location test that appears only in a JOIN \
+condition, read the whole file — minutes, not seconds. Write one SELECT per \
+rectangle and combine them with UNION ALL, each branch with its own four \
+comparisons:
+
+  SELECT 'lyon' AS site, count(*) AS n FROM overture_places
+  WHERE bbox.xmin <= 4.851 AND bbox.xmax >= 4.843
+    AND bbox.ymin <= 45.757 AND bbox.ymax >= 45.751
+  UNION ALL
+  SELECT 'lille', count(*) FROM overture_places
+  WHERE bbox.xmin <= 3.077 AND bbox.xmax >= 3.068
+    AND bbox.ymin <= 50.641 AND bbox.ymax >= 50.635
+
 PARAMETERS.
   sql: one SELECT statement.
   max_rows: row ceiling, applied as an outer LIMIT. Hard, and capped at 1000.
   max_bytes: byte ceiling. Reported, not pre-emptive — see below.
+  A query still running after {DEFAULT_QUERY_TIMEOUT_SECONDS} seconds is stopped, \
+and the error says how much it had read and how to rewrite it.
 
 WHAT COMES BACK. `rows`, `tables_read`, the `executed_sql` actually run, the \
 `scan` block, and `byte_budget_exceeded`. That last one is a verdict after the \
